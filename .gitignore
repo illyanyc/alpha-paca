@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.local
+.env.production
+node_modules/
+.next/
+.DS_Store
+dist/
+build/
+create_tables.py
+_pycdc/
