@@ -1,0 +1,9 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python3 supervisor.py"
+healthcheckPath = "/login"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
