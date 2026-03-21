@@ -12,8 +12,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, HTTPException, Form
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 app = FastAPI(title="Alpha-Paca Crypto", docs_url=None, redoc_url=None)
 
@@ -45,6 +45,17 @@ def _check_session(request: Request) -> bool:
     return hmac.compare_digest(token, expected)
 
 
+def _format_strategy_signals(raw: dict) -> dict:
+    """Compact strategy signals for the dashboard."""
+    out = {}
+    for pair, strats in raw.items():
+        buys = [s["name"] for s in strats if isinstance(s, dict) and s.get("signal") == "buy"]
+        sells = [s["name"] for s in strats if isinstance(s, dict) and s.get("signal") == "sell"]
+        if buys or sells:
+            out[pair] = {"buy": buys, "sell": sells}
+    return out
+
+
 def _snapshot() -> dict[str, Any]:
     """Build a JSON-serializable snapshot of current state."""
     if not _state_ref:
@@ -52,7 +63,7 @@ def _snapshot() -> dict[str, Any]:
     s = _state_ref
     settings = _settings_ref
     uptime = int(time.time() - (_start_time_ref or time.time()))
-    mode = "PAPER" if (settings and settings.alpaca.paper) else "LIVE"
+    mode = s.get("trading_mode", "LIVE")
 
     prices = {}
     for pair, data in s.get("prices", {}).items():
@@ -126,10 +137,27 @@ def _snapshot() -> dict[str, Any]:
             "timestamp": evt.get("timestamp", ""),
         })
 
+    exchange_status = s.get("exchange_status", "checking")
+    exchange_error = s.get("exchange_error", "")
+
+    trading_cfg = {}
+    if settings:
+        trading_cfg = {
+            "max_capital": settings.crypto.max_capital,
+            "risk_per_trade_pct": settings.crypto.risk_per_trade_pct,
+            "max_position_pct": settings.crypto.max_position_pct,
+            "max_drawdown_pct": settings.crypto.max_drawdown_pct,
+            "max_total_exposure_pct": settings.crypto.max_total_exposure_pct,
+            "confidence_threshold": settings.crypto.confidence_threshold,
+            "pairs": settings.crypto.pairs,
+        }
+
     return {
         "mode": mode,
         "uptime": uptime,
         "ts": datetime.now(timezone.utc).isoformat(),
+        "exchange": {"status": exchange_status, "error": exchange_error},
+        "trading_settings": trading_cfg,
         "portfolio": {
             "nav": round(portfolio.get("nav", 0), 2),
             "cash": round(portfolio.get("cash", 0), 2),
@@ -145,7 +173,15 @@ def _snapshot() -> dict[str, Any]:
         "recent_trades": trades,
         "agents": s.get("agent_statuses", {}),
         "healing": healing,
+        "agent_log": s.get("agent_log", [])[-30:],
+        "strategy_signals": _format_strategy_signals(s.get("strategy_signals", {})),
+        "backtest": s.get("backtest_results", {}),
     }
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -184,6 +220,43 @@ async def api_state(request: Request):
     if not _check_session(request):
         raise HTTPException(status_code=401)
     return _snapshot()
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    if not _check_session(request):
+        return RedirectResponse(url="/login", status_code=303)
+    return SETTINGS_HTML
+
+
+@app.post("/api/settings/exchange")
+async def save_exchange_keys(request: Request):
+    """Hot-swap Coinbase API keys, persist to Redis."""
+    if not _check_session(request):
+        raise HTTPException(status_code=401)
+    body = await request.json()
+    api_key = (body.get("api_key") or "").strip()
+    api_secret = (body.get("api_secret") or "").strip()
+
+    if not api_key or not api_secret:
+        return JSONResponse({"status": "error", "error": "API key and secret are required"}, status_code=400)
+
+    from main import reload_coinbase_keys
+    result = await reload_coinbase_keys(api_key, api_secret)
+    status_code = 200 if result["status"] == "connected" else 400
+    return JSONResponse(result, status_code=status_code)
+
+
+@app.post("/api/settings/trading")
+async def save_trading_settings(request: Request):
+    """Update trading parameters, persist to Redis."""
+    if not _check_session(request):
+        raise HTTPException(status_code=401)
+    body = await request.json()
+
+    from main import update_trading_settings
+    result = await update_trading_settings(body)
+    return JSONResponse(result)
 
 
 @app.websocket("/ws")
@@ -273,9 +346,16 @@ tr:last-child td{border-bottom:none}
 .agent-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
 .dot-healthy{background:var(--green)} .dot-running{background:var(--blue);animation:pulse 1s infinite}
 .dot-idle{background:var(--dim)} .dot-error{background:var(--red)}
+.dot-standby{background:var(--purple)}
 .dot-healing{background:var(--yellow);animation:pulse 1.5s infinite}
 .dot-circuit_open{background:#ff8c00;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.tl-entry{padding:3px 0;border-bottom:1px solid rgba(30,45,74,.3)}
+.tl-entry:last-child{border-bottom:none}
+.tl-time{color:var(--dim);margin-right:6px;font-size:10px}
+.tl-agent{font-weight:700;margin-right:6px}
+.tl-news_scout{color:#ffd93d} .tl-technical_analyst{color:#00b4d8} .tl-fundamental_analyst{color:#a78bfa}
+.tl-orchestrator{color:#00d4aa} .tl-risk_validator{color:#ff8c00} .tl-order_executor{color:#ff6b6b}
 .agents-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px}
 .agent-item{display:flex;align-items:center;padding:4px 8px;background:var(--bg);border-radius:6px;font-size:11px}
 .conn{position:fixed;top:8px;right:8px;font-size:10px;padding:3px 8px;border-radius:4px;z-index:99}
@@ -286,9 +366,16 @@ tr:last-child td{border-bottom:none}
 @media(max-width:500px){.grid3{grid-template-columns:1fr 1fr}.stat .value{font-size:15px}table{font-size:11px}th,td{padding:4px 6px}}
 .logout{position:fixed;top:8px;left:8px;font-size:10px;color:var(--dim);text-decoration:none;padding:3px 8px;border-radius:4px;background:var(--card);border:1px solid var(--border)}
 .logout:hover{color:var(--text)}
+.settings-link{position:fixed;top:8px;left:72px;font-size:10px;color:var(--dim);text-decoration:none;padding:3px 8px;border-radius:4px;background:var(--card);border:1px solid var(--border)}
+.settings-link:hover{color:var(--text)}
+.alpaca-banner{padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:12px;display:flex;align-items:center;gap:8px}
+.alpaca-ok{background:rgba(0,212,170,.1);border:1px solid rgba(0,212,170,.3);color:var(--green)}
+.alpaca-fail{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:var(--red)}
+.alpaca-checking{background:rgba(255,217,61,.1);border:1px solid rgba(255,217,61,.3);color:var(--yellow)}
 </style></head><body>
 <div id="conn" class="conn conn-lost">CONNECTING</div>
 <a href="/logout" class="logout">Logout</a>
+<a href="/settings" class="settings-link">⚙️ Settings</a>
 <div class="container">
 
 <div class="header">
@@ -298,6 +385,12 @@ tr:last-child td{border-bottom:none}
 &nbsp; Uptime: <span id="uptime">00:00:00</span>
 &nbsp; <span id="ts"></span>
 </div>
+</div>
+
+<div id="alpaca-banner" class="alpaca-banner alpaca-checking" style="display:none">
+<span id="alpaca-icon">⏳</span>
+<span id="alpaca-msg">Checking Alpaca connection...</span>
+<a href="/settings" style="margin-left:auto;color:inherit;font-weight:700;text-decoration:underline">Fix →</a>
 </div>
 
 <div class="section">
@@ -351,6 +444,16 @@ tr:last-child td{border-bottom:none}
 <div class="agents-grid" id="agents-grid"></div>
 </div>
 
+<div class="section" id="strategy-section">
+<div class="section-title">🎯 Strategy Signals</div>
+<div id="strategy-body" style="font-size:11px"></div>
+</div>
+
+<div class="section" id="thinking-section">
+<div class="section-title">🧠 Agent Thinking</div>
+<div id="thinking-log" style="max-height:280px;overflow-y:auto;font-size:11px;line-height:1.7"></div>
+</div>
+
 <div class="section" id="healing-section" style="display:none">
 <div class="section-title">🩺 Self-Healing</div>
 <div style="overflow-x:auto"><table>
@@ -399,6 +502,28 @@ const AGENT_ICONS = {
 
 function render(d) {
   if (!d || !d.portfolio) return;
+
+  // Exchange status banner
+  const ab = $('alpaca-banner');
+  const exch = d.exchange || {};
+  if (exch.status === 'connected') {
+    ab.style.display = 'flex';
+    ab.className = 'alpaca-banner alpaca-ok';
+    $('alpaca-icon').textContent = '✅';
+    $('alpaca-msg').textContent = 'Coinbase connected — trading enabled';
+  } else if (exch.status === 'unauthorized') {
+    ab.style.display = 'flex';
+    ab.className = 'alpaca-banner alpaca-fail';
+    $('alpaca-icon').textContent = '🔴';
+    $('alpaca-msg').textContent = 'Coinbase unauthorized — ' + (exch.error || 'check API keys');
+  } else if (exch.status === 'checking') {
+    ab.style.display = 'flex';
+    ab.className = 'alpaca-banner alpaca-checking';
+    $('alpaca-icon').textContent = '⏳';
+    $('alpaca-msg').textContent = 'Checking Coinbase connection...';
+  } else {
+    ab.style.display = 'none';
+  }
 
   // Mode
   const badge = $('mode-badge');
@@ -487,6 +612,51 @@ function render(d) {
   });
   $('agents-grid').innerHTML = agentHTML;
 
+  // Strategy Signals
+  const strats = d.strategy_signals || {};
+  const sBody = $('strategy-body');
+  const sPairs = Object.keys(strats);
+  if (sPairs.length > 0) {
+    let sHTML = '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+    sPairs.forEach(pair => {
+      const s = strats[pair];
+      const buys = (s.buy||[]).map(n => '<span style="color:var(--green)">▲'+n+'</span>').join(' ');
+      const sells = (s.sell||[]).map(n => '<span style="color:var(--red)">▼'+n+'</span>').join(' ');
+      sHTML += `<div style="background:var(--bg);padding:4px 8px;border-radius:6px;border:1px solid var(--border)"><b>${pair}</b> ${buys} ${sells}</div>`;
+    });
+    const bt = d.backtest || {};
+    if (bt.aggregate) {
+      sHTML += '</div><div style="margin-top:8px;color:var(--dim)">Backtest: ';
+      bt.aggregate.forEach(a => {
+        const col = a.sharpe > 0.5 ? 'var(--green)' : (a.sharpe > 0 ? 'var(--yellow)' : 'var(--red)');
+        sHTML += `<span style="color:${col}">${a.name}(S=${a.sharpe.toFixed(1)},W=${(a.win_rate*100).toFixed(0)}%,w=${(a.weight*100).toFixed(0)}%)</span> `;
+      });
+      sHTML += '</div>';
+    }
+    sBody.innerHTML = sHTML;
+  } else {
+    sBody.innerHTML = '<span style="color:var(--dim)">Computing strategies...</span>';
+  }
+
+  // Agent Thinking
+  const alog = d.agent_log || [];
+  const tDiv = $('thinking-log');
+  if (alog.length > 0) {
+    const ICONS = {news_scout:'📰',technical_analyst:'📈',fundamental_analyst:'🔬',orchestrator:'🧠',risk_validator:'🛡️',order_executor:'⚡'};
+    let tHTML = '';
+    alog.slice(-25).forEach(e => {
+      const ts = (e.ts||'').slice(11,19);
+      const icon = ICONS[e.agent]||'🤖';
+      tHTML += `<div class="tl-entry"><span class="tl-time">${ts}</span>` +
+        `<span class="tl-agent tl-${e.agent}">${icon} ${e.agent.replace(/_/g,' ')}</span>` +
+        `<span>${e.step}</span></div>`;
+    });
+    tDiv.innerHTML = tHTML;
+    tDiv.scrollTop = tDiv.scrollHeight;
+  } else {
+    tDiv.innerHTML = '<div style="color:var(--dim);text-align:center;padding:12px">Waiting for first agent cycle...</div>';
+  }
+
   // Healing
   const healing = d.healing || [];
   const healSec = $('healing-section');
@@ -531,5 +701,232 @@ setInterval(async () => {
     if (r.ok) render(await r.json());
   } catch(e) {}
 }, 5000);
+</script>
+</body></html>"""
+
+
+SETTINGS_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Alpha-Paca Crypto - Settings</title>
+<style>
+:root{--bg:#0a0e17;--card:#131a2b;--border:#1e2d4a;--text:#e0e6ed;--dim:#6b7b9e;
+--green:#00d4aa;--red:#ff6b6b;--yellow:#ffd93d;--blue:#00b4d8}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'SF Mono',SFMono-Regular,Menlo,monospace;
+font-size:13px;-webkit-font-smoothing:antialiased}
+.container{max-width:600px;margin:0 auto;padding:16px}
+.header{display:flex;align-items:center;gap:12px;padding:16px 0;border-bottom:1px solid var(--border);margin-bottom:20px}
+.header h1{font-size:18px;letter-spacing:1px}
+.back{color:var(--dim);text-decoration:none;font-size:20px;padding:4px 8px}
+.back:hover{color:var(--text)}
+.section{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+.section-title{font-size:12px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.field input,.field select{width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;
+color:var(--text);font-family:inherit;font-size:13px;outline:none}
+.field input:focus,.field select:focus{border-color:var(--green)}
+.field input[type="password"]{letter-spacing:2px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.toggle-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.toggle{position:relative;width:44px;height:24px;background:var(--border);border-radius:12px;cursor:pointer;transition:.2s}
+.toggle.on{background:var(--green)}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;background:#fff;border-radius:50%;transition:.2s}
+.toggle.on::after{left:22px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border:none;border-radius:8px;font-family:inherit;font-size:13px;font-weight:700;cursor:pointer;transition:.15s}
+.btn-primary{background:linear-gradient(135deg,var(--green),var(--blue));color:var(--bg)}
+.btn-primary:hover{opacity:.9}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.status-msg{margin-top:12px;padding:8px 12px;border-radius:8px;font-size:12px;display:none}
+.status-ok{display:block;background:rgba(0,212,170,.1);border:1px solid rgba(0,212,170,.3);color:var(--green)}
+.status-err{display:block;background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:var(--red)}
+.status-loading{display:block;background:rgba(255,217,61,.1);border:1px solid rgba(255,217,61,.3);color:var(--yellow)}
+.current-status{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:12px}
+.cs-ok{background:rgba(0,212,170,.08);color:var(--green)}
+.cs-fail{background:rgba(255,107,107,.08);color:var(--red)}
+.cs-checking{background:rgba(255,217,61,.08);color:var(--yellow)}
+.hint{font-size:11px;color:var(--dim);margin-top:4px}
+.divider{border:none;border-top:1px solid var(--border);margin:16px 0}
+</style></head><body>
+<div class="container">
+<div class="header">
+<a href="/" class="back">←</a>
+<h1>⚙️ Settings</h1>
+</div>
+
+<div class="section">
+<div class="section-title">🔑 Coinbase API Keys</div>
+<div id="current-status" class="current-status cs-checking">⏳ Checking...</div>
+
+<div class="field">
+<label>API Key</label>
+<input type="text" id="api-key" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" spellcheck="false">
+</div>
+<div class="field">
+<label>API Secret</label>
+<input type="password" id="api-secret" placeholder="Enter Coinbase API secret" autocomplete="off">
+</div>
+
+<button class="btn btn-primary" id="save-btn" onclick="saveKeys()">
+💾 Save & Test Connection
+</button>
+<div id="status-msg" class="status-msg"></div>
+<div class="hint" style="margin-top:8px">Keys are saved to Redis and persist across redeploys.</div>
+</div>
+
+<div class="section">
+<div class="section-title">💰 Trading Parameters</div>
+
+<div class="field">
+<label>Max Investable Capital ($)</label>
+<input type="number" id="t-max-capital" min="0" step="100" placeholder="1000">
+<div class="hint">Maximum USD the system can deploy — even if your Coinbase account has more</div>
+</div>
+
+<div class="row2">
+<div class="field">
+<label>Risk per Trade (%)</label>
+<input type="number" id="t-risk-per-trade" min="0.1" max="10" step="0.1" placeholder="2.0">
+</div>
+<div class="field">
+<label>Max Position (%)</label>
+<input type="number" id="t-max-position" min="1" max="100" step="1" placeholder="30">
+</div>
+</div>
+
+<div class="row2">
+<div class="field">
+<label>Max Drawdown (%)</label>
+<input type="number" id="t-max-drawdown" min="1" max="50" step="1" placeholder="10">
+</div>
+<div class="field">
+<label>Max Total Exposure (%)</label>
+<input type="number" id="t-max-exposure" min="10" max="100" step="5" placeholder="90">
+</div>
+</div>
+
+<div class="field">
+<label>Confidence Threshold (0-1)</label>
+<input type="number" id="t-confidence" min="0.1" max="1.0" step="0.05" placeholder="0.5">
+<div class="hint">Minimum AI confidence to execute a trade. Lower = more trades, higher = more selective</div>
+</div>
+
+<div class="field">
+<label>Trading Pairs (comma-separated)</label>
+<input type="text" id="t-pairs" placeholder="BTC/USD,ETH/USD,SOL/USD" spellcheck="false">
+</div>
+
+<button class="btn btn-primary" id="save-trading-btn" onclick="saveTradingSettings()">
+💾 Save Trading Settings
+</button>
+<div id="trading-status-msg" class="status-msg"></div>
+<div class="hint" style="margin-top:8px">Settings are saved to Redis — applied immediately and persist across redeploys.</div>
+</div>
+
+<div class="section">
+<div class="section-title">ℹ️ Help</div>
+<div style="font-size:12px;color:var(--dim);line-height:1.6">
+<p>• Get API keys from <a href="https://www.coinbase.com/settings/api" target="_blank" style="color:var(--blue)">coinbase.com/settings/api</a></p>
+<p>• Create an <b>Advanced Trade</b> key with <b>Trade</b> + <b>View</b> permissions</p>
+<p>• All settings saved here are stored in <b>Redis</b> and override env vars on startup</p>
+</div>
+</div>
+
+</div>
+<script>
+const $ = id => document.getElementById(id);
+
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/state', {credentials:'same-origin'});
+    if (!r.ok) return;
+    const d = await r.json();
+
+    const cs = $('current-status');
+    const exch = d.exchange || {};
+    if (exch.status === 'connected') {
+      cs.className = 'current-status cs-ok'; cs.innerHTML = '✅ Coinbase connected — trading enabled';
+    } else if (exch.status === 'unauthorized') {
+      cs.className = 'current-status cs-fail'; cs.innerHTML = '🔴 Unauthorized — ' + (exch.error || 'check API keys');
+    } else {
+      cs.className = 'current-status cs-checking'; cs.innerHTML = '⏳ Checking...';
+    }
+
+    const ts = d.trading_settings || {};
+    if (ts.max_capital !== undefined) $('t-max-capital').value = ts.max_capital;
+    if (ts.risk_per_trade_pct !== undefined) $('t-risk-per-trade').value = ts.risk_per_trade_pct;
+    if (ts.max_position_pct !== undefined) $('t-max-position').value = ts.max_position_pct;
+    if (ts.max_drawdown_pct !== undefined) $('t-max-drawdown').value = ts.max_drawdown_pct;
+    if (ts.max_total_exposure_pct !== undefined) $('t-max-exposure').value = ts.max_total_exposure_pct;
+    if (ts.confidence_threshold !== undefined) $('t-confidence').value = ts.confidence_threshold;
+    if (ts.pairs) $('t-pairs').value = ts.pairs;
+  } catch(e) { console.error(e); }
+}
+
+async function saveKeys() {
+  const btn = $('save-btn'), msg = $('status-msg');
+  const apiKey = $('api-key').value.trim();
+  const apiSecret = $('api-secret').value.trim();
+
+  if (!apiKey || !apiSecret) { msg.className='status-msg status-err'; msg.textContent='Both API key and secret are required'; return; }
+
+  btn.disabled = true; btn.textContent = '⏳ Testing...';
+  msg.className = 'status-msg status-loading'; msg.textContent = 'Connecting to Coinbase...';
+
+  try {
+    const r = await fetch('/api/settings/exchange', {
+      method:'POST', headers:{'Content-Type':'application/json'}, credentials:'same-origin',
+      body: JSON.stringify({api_key:apiKey, api_secret:apiSecret}),
+    });
+    const data = await r.json();
+    if (data.status === 'connected') {
+      msg.className='status-msg status-ok'; msg.textContent='✅ Connected to Coinbase!';
+      $('api-secret').value = ''; loadStatus();
+    } else {
+      msg.className='status-msg status-err'; msg.textContent='❌ ' + (data.error || 'unauthorized');
+    }
+  } catch(e) {
+    msg.className='status-msg status-err'; msg.textContent='❌ Network error: ' + e.message;
+  } finally { btn.disabled=false; btn.textContent='💾 Save & Test Connection'; }
+}
+
+async function saveTradingSettings() {
+  const btn = $('save-trading-btn'), msg = $('trading-status-msg');
+  const body = {
+    max_capital: parseFloat($('t-max-capital').value) || undefined,
+    risk_per_trade_pct: parseFloat($('t-risk-per-trade').value) || undefined,
+    max_position_pct: parseFloat($('t-max-position').value) || undefined,
+    max_drawdown_pct: parseFloat($('t-max-drawdown').value) || undefined,
+    max_total_exposure_pct: parseFloat($('t-max-exposure').value) || undefined,
+    confidence_threshold: parseFloat($('t-confidence').value) || undefined,
+    pairs: $('t-pairs').value.trim() || undefined,
+  };
+  Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+
+  if (Object.keys(body).length === 0) { msg.className='status-msg status-err'; msg.textContent='No changes to save'; return; }
+
+  btn.disabled = true; btn.textContent = '⏳ Saving...';
+  msg.className='status-msg status-loading'; msg.textContent='Saving...';
+
+  try {
+    const r = await fetch('/api/settings/trading', {
+      method:'POST', headers:{'Content-Type':'application/json'}, credentials:'same-origin',
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      msg.className='status-msg status-ok'; msg.textContent='✅ Saved: ' + (data.updated||[]).join(', ');
+      loadStatus();
+    } else {
+      msg.className='status-msg status-err'; msg.textContent='❌ ' + (data.error || 'failed');
+    }
+  } catch(e) {
+    msg.className='status-msg status-err'; msg.textContent='❌ Network error: ' + e.message;
+  } finally { btn.disabled=false; btn.textContent='💾 Save Trading Settings'; }
+}
+
+loadStatus();
 </script>
 </body></html>"""

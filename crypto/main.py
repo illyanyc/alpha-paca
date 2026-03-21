@@ -9,6 +9,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
@@ -29,8 +30,11 @@ from config import get_settings
 from db.engine import Base, async_session_factory, engine
 from db.models import CryptoPortfolioState, CryptoPosition, CryptoTrade
 from display import build_full_display
+from engine.backtester import run_backtest_cycle
+from engine.learner import AdaptiveLearner
 from engine.position_sizer import compute_position_size
-from services.alpaca_crypto import AlpacaCryptoService
+from engine.strategies import run_all_strategies
+from services.coinbase_crypto import CoinbaseCryptoService
 from services.price_tracker import PriceTracker
 from services.telegram import TelegramService
 from web import app as web_app, init_web
@@ -39,6 +43,7 @@ structlog.configure(
     processors=[
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.add_log_level,
+        structlog.processors.format_exc_info,
         structlog.dev.ConsoleRenderer(),
     ],
     wrapper_class=structlog.BoundLogger,
@@ -51,7 +56,7 @@ logger = structlog.get_logger("crypto.main")
 HEARTBEAT_KEY = "crypto:heartbeat"
 HEARTBEAT_INTERVAL = 5
 TICK_30S = 30
-TICK_5M = 300
+TICK_5M = 120
 TICK_1H = 3600
 TICK_24H = 86400
 
@@ -59,7 +64,7 @@ _shutdown = asyncio.Event()
 _start_time = time.time()
 
 # ── Shared mutable state for display ─────────────────────────────────
-_state = {
+_state: dict[str, Any] = {
     "prices": {},
     "price_history": {},
     "portfolio": {},
@@ -77,7 +82,88 @@ _state = {
         "order_executor": "idle",
     },
     "healing_events": [],
+    "agent_log": [],
+    "strategy_signals": {},
+    "backtest_results": {},
+    "exchange_status": "checking",
+    "exchange_error": "",
+    "trading_mode": "",
 }
+
+
+_exchange_ref: CoinbaseCryptoService | None = None
+_learner: AdaptiveLearner | None = None
+
+
+def get_exchange() -> CoinbaseCryptoService | None:
+    return _exchange_ref
+
+
+async def reload_coinbase_keys(api_key: str, api_secret: str) -> dict[str, str]:
+    """Hot-swap Coinbase credentials, persist to Redis, update in-memory client."""
+    global _exchange_ref
+    from services.settings_store import save_coinbase_keys
+
+    try:
+        from coinbase.rest import RESTClient
+        test_client = RESTClient(api_key=api_key, api_secret=api_secret)
+        acct_raw = test_client.get_accounts(limit=1)
+        if _exchange_ref:
+            _exchange_ref.replace_client(api_key, api_secret)
+        _state["exchange_status"] = "connected"
+        _state["exchange_error"] = ""
+        _state["trading_mode"] = "LIVE"
+        await save_coinbase_keys(api_key, api_secret)
+        logger.info("coinbase_keys_reloaded")
+        return {"status": "connected"}
+    except Exception as e:
+        err = str(e).strip()
+        _state["exchange_status"] = "unauthorized"
+        _state["exchange_error"] = err
+        logger.warning("coinbase_keys_reload_failed", error=err)
+        return {"status": "unauthorized", "error": err}
+
+
+async def update_trading_settings(new_settings: dict) -> dict[str, str]:
+    """Update trading parameters in-memory and persist to Redis."""
+    from services.settings_store import save_trading_settings
+
+    settings = get_settings()
+    updated = []
+    if "max_capital" in new_settings:
+        settings.crypto.max_capital = float(new_settings["max_capital"])
+        updated.append("max_capital")
+    if "risk_per_trade_pct" in new_settings:
+        settings.crypto.risk_per_trade_pct = float(new_settings["risk_per_trade_pct"])
+        updated.append("risk_per_trade_pct")
+    if "max_position_pct" in new_settings:
+        settings.crypto.max_position_pct = float(new_settings["max_position_pct"])
+        updated.append("max_position_pct")
+    if "max_drawdown_pct" in new_settings:
+        settings.crypto.max_drawdown_pct = float(new_settings["max_drawdown_pct"])
+        updated.append("max_drawdown_pct")
+    if "max_total_exposure_pct" in new_settings:
+        settings.crypto.max_total_exposure_pct = float(new_settings["max_total_exposure_pct"])
+        updated.append("max_total_exposure_pct")
+    if "confidence_threshold" in new_settings:
+        settings.crypto.confidence_threshold = float(new_settings["confidence_threshold"])
+        updated.append("confidence_threshold")
+    if "pairs" in new_settings:
+        settings.crypto.pairs = str(new_settings["pairs"])
+        updated.append("pairs")
+
+    persisted = {
+        "max_capital": settings.crypto.max_capital,
+        "risk_per_trade_pct": settings.crypto.risk_per_trade_pct,
+        "max_position_pct": settings.crypto.max_position_pct,
+        "max_drawdown_pct": settings.crypto.max_drawdown_pct,
+        "max_total_exposure_pct": settings.crypto.max_total_exposure_pct,
+        "confidence_threshold": settings.crypto.confidence_threshold,
+        "pairs": settings.crypto.pairs,
+    }
+    await save_trading_settings(persisted)
+    logger.info("trading_settings_updated", updated=updated)
+    return {"status": "ok", "updated": updated}
 
 
 def _handle_signal(signum, frame):
@@ -90,12 +176,13 @@ async def create_tables() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def get_portfolio_state(alpaca: AlpacaCryptoService) -> dict:
+async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
     settings = get_settings()
     try:
-        acct = alpaca.get_account()
-        positions = alpaca.get_positions()
-    except Exception:
+        acct = await asyncio.to_thread(exchange.get_account)
+        positions = await asyncio.to_thread(exchange.get_positions)
+    except Exception as e:
+        logger.warning("portfolio_state_fallback", error=str(e))
         return {
             "nav": settings.crypto.max_capital,
             "cash": settings.crypto.max_capital,
@@ -121,14 +208,14 @@ async def get_portfolio_state(alpaca: AlpacaCryptoService) -> dict:
 
 async def heartbeat_loop(redis_conn: aioredis.Redis) -> None:
     while not _shutdown.is_set():
-        await redis_conn.set(HEARTBEAT_KEY, datetime.now(timezone.utc).isoformat(), ex=30)
+        await redis_conn.set(HEARTBEAT_KEY, datetime.now(timezone.utc).isoformat(), ex=120)
         await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
 async def tick_30s(
     tech_agent: TechnicalAnalystAgent,
     price_tracker: PriceTracker,
-    alpaca: AlpacaCryptoService,
+    exchange: CoinbaseCryptoService,
 ) -> None:
     while not _shutdown.is_set():
         try:
@@ -144,11 +231,31 @@ async def tick_30s(
             if isinstance(result, dict) and "error" not in result:
                 _state["tech_signals"] = result
 
-            portfolio = await get_portfolio_state(alpaca)
+            settings = get_settings()
+            strat_signals: dict[str, list] = {}
+            for pair in settings.crypto.pair_list:
+                try:
+                    bars = await asyncio.to_thread(exchange.get_bars, pair, lookback_minutes=120)
+                    if len(bars) >= 30:
+                        from engine.indicators import compute_all
+                        ind = compute_all(bars)
+                        sigs = run_all_strategies(bars, ind)
+                        strat_signals[pair] = sigs
+                except Exception:
+                    pass
+            if strat_signals:
+                _state["strategy_signals"] = strat_signals
+                r = await tech_agent._get_redis()
+                await r.set("crypto:signals:strategies", json.dumps(strat_signals), ex=120)
+
+            portfolio = await get_portfolio_state(exchange)
             _state["portfolio"] = portfolio
-            _state["positions"] = alpaca.get_positions()
-        except Exception:
-            logger.exception("tick_30s_error")
+            try:
+                _state["positions"] = await asyncio.to_thread(exchange.get_positions)
+            except Exception as pos_err:
+                logger.warning("positions_fetch_failed", error=str(pos_err))
+        except Exception as e:
+            logger.exception("tick_30s_error", error_msg=str(e))
         await asyncio.sleep(TICK_30S)
 
 
@@ -159,7 +266,7 @@ async def tick_5m(
     risk_agent: RiskValidatorAgent,
     executor: OrderExecutorAgent,
     price_tracker: PriceTracker,
-    alpaca: AlpacaCryptoService,
+    exchange: CoinbaseCryptoService,
 ) -> None:
     await asyncio.sleep(10)
     while not _shutdown.is_set():
@@ -175,18 +282,49 @@ async def tick_5m(
             if isinstance(fund_result, dict) and "error" not in fund_result:
                 _state["fund_signals"] = fund_result
 
-            positions = alpaca.get_positions()
-            portfolio = await get_portfolio_state(alpaca)
-            _state["positions"] = positions
+            try:
+                positions = await asyncio.to_thread(exchange.get_positions)
+                _state["positions"] = positions
+            except Exception as pos_err:
+                logger.warning("positions_fetch_failed", error=str(pos_err), tick="5m")
+                positions = _state.get("positions", [])
+
+            portfolio = await get_portfolio_state(exchange)
             _state["portfolio"] = portfolio
+
+            learning_summary = _learner.get_learning_summary() if _learner else {}
 
             orch_result = await orchestrator.safe_run(
                 positions=positions,
                 portfolio_state=portfolio,
+                learning_summary=learning_summary,
             )
 
+            all_decisions = orch_result.get("all_decisions", [])
             decisions = orch_result.get("decisions", [])
+            outlook = orch_result.get("market_outlook", "unknown")
+            summary = orch_result.get("summary", "")
+
+            logger.info(
+                "orchestrator_cycle",
+                outlook=outlook,
+                total=len(all_decisions),
+                actionable=len(decisions),
+                summary=summary[:120],
+            )
+
+            if not decisions:
+                _state["agent_statuses"]["risk_validator"] = "standby"
+                _state["agent_statuses"]["order_executor"] = "standby"
+
             for decision in decisions:
+                logger.info(
+                    "executing_decision",
+                    pair=decision.get("pair"),
+                    action=decision.get("action"),
+                    confidence=decision.get("confidence"),
+                )
+
                 risk_result = await risk_agent.safe_run(
                     decision=decision,
                     positions=positions,
@@ -194,6 +332,7 @@ async def tick_5m(
                 )
 
                 if not risk_result.get("approved", False):
+                    logger.info("trade_rejected_by_risk", pair=decision.get("pair"), reasons=risk_result.get("reasons"))
                     continue
 
                 prices = await price_tracker.get_all_cached_prices()
@@ -208,8 +347,17 @@ async def tick_5m(
                     available_capital=portfolio.get("cash", 0),
                 )
 
+                logger.info(
+                    "executor_result",
+                    pair=pair,
+                    status=exec_result.get("status"),
+                    error=exec_result.get("error"),
+                    qty=exec_result.get("qty"),
+                    price=exec_result.get("price"),
+                )
+
                 if exec_result.get("status") == "filled":
-                    _state["recent_trades"].append({
+                    trade_entry = {
                         "pair": pair,
                         "side": exec_result.get("side", decision.get("action")),
                         "qty": exec_result.get("qty", 0),
@@ -217,20 +365,70 @@ async def tick_5m(
                         "pnl": exec_result.get("pnl", 0),
                         "reasoning": decision.get("reasoning", ""),
                         "opened_at": datetime.now(timezone.utc).isoformat(),
-                    })
+                    }
+                    _state["recent_trades"].append(trade_entry)
                     _state["recent_trades"] = _state["recent_trades"][-20:]
 
-        except Exception:
-            logger.exception("tick_5m_error")
+                    if _learner and exec_result.get("pnl") is not None:
+                        pnl_pct = exec_result.get("pnl_pct", 0)
+                        strat_sigs = _state.get("strategy_signals", {}).get(pair, [])
+                        strat_dict = {s["name"]: s for s in strat_sigs if isinstance(s, dict)}
+                        _learner.record_trade(
+                            pair=pair,
+                            side=trade_entry["side"],
+                            pnl_pct=pnl_pct,
+                            strategy_signals=strat_dict,
+                            confidence=decision.get("confidence", 0),
+                        )
+
+            from services.settings_store import save_agent_log as _sal
+            await _sal(_state.get("agent_log", []))
+
+            if _learner:
+                r = await news_agent._get_redis()
+                await _learner.save(r)
+
+        except Exception as e:
+            logger.exception("tick_5m_error", error_msg=str(e))
         await asyncio.sleep(TICK_5M)
 
 
-async def tick_1h(telegram: TelegramService, alpaca: AlpacaCryptoService) -> None:
+async def tick_backtest(exchange: CoinbaseCryptoService, redis_conn: aioredis.Redis) -> None:
+    """Run backtests every hour to update strategy weights."""
+    await asyncio.sleep(30)
+    while not _shutdown.is_set():
+        try:
+            settings = get_settings()
+            bt_result = await run_backtest_cycle(
+                pairs=settings.crypto.pair_list,
+                get_bars_fn=exchange.get_bars,
+                redis_conn=redis_conn,
+            )
+            _state["backtest_results"] = bt_result
+
+            if _learner:
+                bt_weights = bt_result.get("strategy_weights", {})
+                adaptive = _learner.get_adaptive_weights(bt_weights)
+                logger.info(
+                    "adaptive_weights_updated",
+                    weights={k: round(v, 2) for k, v in adaptive.items()},
+                )
+        except Exception as e:
+            logger.exception("backtest_error", error_msg=str(e))
+        await asyncio.sleep(3600)
+
+
+async def tick_1h(telegram: TelegramService, exchange: CoinbaseCryptoService) -> None:
     await asyncio.sleep(60)
     while not _shutdown.is_set():
         try:
-            positions = alpaca.get_positions()
-            portfolio = await get_portfolio_state(alpaca)
+            try:
+                positions = await asyncio.to_thread(exchange.get_positions)
+            except Exception as pos_err:
+                logger.warning("positions_fetch_failed", error=str(pos_err), tick="1h")
+                positions = []
+
+            portfolio = await get_portfolio_state(exchange)
             pos_data = [
                 {
                     "pair": p.get("symbol", ""),
@@ -245,8 +443,8 @@ async def tick_1h(telegram: TelegramService, alpaca: AlpacaCryptoService) -> Non
                 unrealized_pnl=portfolio.get("unrealized_pnl", 0),
                 exposure_pct=portfolio.get("total_exposure_pct", 0),
             )
-        except Exception:
-            logger.exception("tick_1h_error")
+        except Exception as e:
+            logger.exception("tick_1h_error", error_msg=str(e))
         await asyncio.sleep(TICK_1H)
 
 
@@ -284,7 +482,7 @@ async def tick_24h(telegram: TelegramService) -> None:
 
 async def display_loop(live: Live, settings) -> None:
     """Update the rich terminal UI every 2 seconds."""
-    mode = "PAPER" if settings.alpaca.paper else "LIVE"
+    mode = "LIVE"
     while not _shutdown.is_set():
         try:
             uptime = int(time.time() - _start_time)
@@ -316,20 +514,72 @@ async def run() -> None:
 
     redis_conn = aioredis.from_url(settings.database.redis_url, decode_responses=True)
 
-    alpaca = AlpacaCryptoService()
+    from services.settings_store import (
+        init_store, load_coinbase_keys, load_trading_settings,
+        load_agent_log, save_agent_log,
+    )
+    init_store(redis_conn)
+
+    redis_keys = await load_coinbase_keys()
+    if redis_keys:
+        logger.info("using_redis_coinbase_keys")
+        settings.coinbase.api_key = redis_keys["api_key"]
+        settings.coinbase.api_secret = redis_keys["api_secret"]
+
+    _state["trading_mode"] = "LIVE"
+
+    redis_trading = await load_trading_settings()
+    if redis_trading:
+        logger.info("using_redis_trading_settings", keys=list(redis_trading.keys()))
+        for k, v in redis_trading.items():
+            if hasattr(settings.crypto, k):
+                setattr(settings.crypto, k, type(getattr(settings.crypto, k))(v))
+
+    saved_log = await load_agent_log()
+    if saved_log:
+        _state["agent_log"] = saved_log
+        logger.info("agent_log_loaded_from_redis", entries=len(saved_log))
+
+    global _exchange_ref
+    exchange = CoinbaseCryptoService()
+    _exchange_ref = exchange
+
+    try:
+        acct = await asyncio.to_thread(exchange.get_account)
+        logger.info(
+            "coinbase_connected",
+            equity=acct.get("equity"),
+            cash=acct.get("cash"),
+        )
+        _state["exchange_status"] = "connected"
+        _state["exchange_error"] = ""
+    except Exception as e:
+        err_msg = str(e).strip()
+        logger.error(
+            "coinbase_auth_failed",
+            error=err_msg,
+            hint="Check COINBASE_API_KEY / COINBASE_API_SECRET env vars.",
+        )
+        _state["exchange_status"] = "unauthorized"
+        _state["exchange_error"] = err_msg
+
     telegram = TelegramService()
-    price_tracker = PriceTracker(alpaca)
+    price_tracker = PriceTracker(exchange)
 
     healer = HealerAgent()
     set_healer(healer)
     set_state_ref(_state)
 
+    global _learner
+    _learner = AdaptiveLearner()
+    await _learner.load(redis_conn)
+
     news_agent = NewsScoutAgent()
-    tech_agent = TechnicalAnalystAgent(alpaca)
-    fund_agent = FundamentalAnalystAgent(alpaca)
+    tech_agent = TechnicalAnalystAgent(exchange)
+    fund_agent = FundamentalAnalystAgent(exchange)
     orchestrator = OrchestratorAgent()
     risk_agent = RiskValidatorAgent()
-    executor = OrderExecutorAgent(alpaca, telegram)
+    executor = OrderExecutorAgent(exchange, telegram)
 
     _state["portfolio"] = {
         "nav": settings.crypto.max_capital,
@@ -340,10 +590,10 @@ async def run() -> None:
     }
 
     await telegram.send(
-        "🚀 *Alpha-Paca Crypto Started*\n"
+        "🚀 *Alpha-Paca Crypto Started (Coinbase)*\n"
         f"Pairs: {', '.join(settings.crypto.pair_list)}\n"
         f"Capital: ${settings.crypto.max_capital:,.0f}\n"
-        f"Mode: {'PAPER' if settings.alpaca.paper else 'LIVE'}"
+        f"Mode: LIVE"
     )
 
     # Bind shared state to the web dashboard
@@ -375,11 +625,12 @@ async def run() -> None:
     async def _run_tasks():
         core_tasks = [
             asyncio.create_task(heartbeat_loop(redis_conn), name="heartbeat"),
-            asyncio.create_task(tick_30s(tech_agent, price_tracker, alpaca), name="tick_30s"),
+            asyncio.create_task(tick_30s(tech_agent, price_tracker, exchange), name="tick_30s"),
             asyncio.create_task(tick_5m(
-                news_agent, fund_agent, orchestrator, risk_agent, executor, price_tracker, alpaca
+                news_agent, fund_agent, orchestrator, risk_agent, executor, price_tracker, exchange
             ), name="tick_5m"),
-            asyncio.create_task(tick_1h(telegram, alpaca), name="tick_1h"),
+            asyncio.create_task(tick_1h(telegram, exchange), name="tick_1h"),
+            asyncio.create_task(tick_backtest(exchange, redis_conn), name="backtest"),
             asyncio.create_task(tick_24h(telegram), name="tick_24h"),
             asyncio.create_task(_safe_web_serve(), name="web"),
         ]

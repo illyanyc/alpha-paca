@@ -1,23 +1,43 @@
 """Crypto trading service configuration loaded from environment variables."""
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env.local")
+
 
 class AlpacaSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ALPACA_")
+    model_config = SettingsConfigDict(
+        env_prefix="ALPACA_", env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
+    )
     api_key: str = ""
     api_secret: str = ""
     paper: bool = True
 
 
+class CoinbaseSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="COINBASE_", env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
+    )
+    api_key: str = ""
+    api_secret: str = ""
+
+
 class APIKeySettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
+    )
     serper_api_key: str = Field("", alias="SERPER_API_KEY")
     tavily_api_key: str = Field("", alias="TAVILY_API_KEY")
     anthropic_api_key: str = Field("", alias="ANTHROPIC_API_KEY")
 
 
 class DatabaseSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
+    )
     database_url: str = Field(
         "postgresql+asyncpg://localhost:5432/alphapaca", alias="DATABASE_URL"
     )
@@ -25,12 +45,17 @@ class DatabaseSettings(BaseSettings):
 
 
 class TelegramSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
+    )
     bot_token: str = Field("", alias="TELEGRAM_BOT_TOKEN")
     chat_id: str = Field("", alias="TELEGRAM_CHAT_ID")
 
 
 class CryptoTradingSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="CRYPTO_")
+    model_config = SettingsConfigDict(
+        env_prefix="CRYPTO_", env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
+    )
     max_capital: float = 1000.0
     pairs: str = "BTC/USD,ETH/USD,SOL/USD,DOGE/USD,LINK/USD"
     risk_per_trade_pct: float = 2.0
@@ -47,11 +72,12 @@ class CryptoTradingSettings(BaseSettings):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file="../.env.local",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
     alpaca: AlpacaSettings = AlpacaSettings()
+    coinbase: CoinbaseSettings = CoinbaseSettings()
     api_keys: APIKeySettings = APIKeySettings()
     database: DatabaseSettings = DatabaseSettings()
     telegram: TelegramSettings = TelegramSettings()

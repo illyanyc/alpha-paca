@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -11,7 +12,7 @@ from sqlalchemy import select
 from agents.base import BaseAgent
 from db.engine import async_session_factory
 from db.models import CryptoPosition, CryptoTrade
-from services.alpaca_crypto import AlpacaCryptoService
+from services.coinbase_crypto import CoinbaseCryptoService
 from services.telegram import TelegramService
 
 logger = structlog.get_logger(__name__)
@@ -20,9 +21,9 @@ logger = structlog.get_logger(__name__)
 class OrderExecutorAgent(BaseAgent):
     name = "order_executor"
 
-    def __init__(self, alpaca: AlpacaCryptoService, telegram: TelegramService) -> None:
+    def __init__(self, exchange: CoinbaseCryptoService, telegram: TelegramService) -> None:
         super().__init__()
-        self._alpaca = alpaca
+        self._exchange = exchange
         self._telegram = telegram
 
     async def run(self, **kwargs) -> dict:
@@ -47,8 +48,11 @@ class OrderExecutorAgent(BaseAgent):
             return {"status": "no_action", "pair": pair}
 
         if action == "BUY":
+            notional = available_capital * (size_pct / 100)
+            self.think(f"⚡ Executing BUY {pair}: ${notional:,.0f} at ${price:,.2f} (conf={confidence:.2f})")
             return await self._execute_buy(pair, size_pct, price, available_capital, confidence, reasoning)
         elif action == "SELL":
+            self.think(f"⚡ Executing SELL {pair} (conf={confidence:.2f})")
             return await self._execute_sell(pair, confidence, reasoning)
 
         return {"status": "unknown_action", "action": action}
@@ -69,12 +73,17 @@ class OrderExecutorAgent(BaseAgent):
             return {"status": "skip", "reason": "zero qty"}
 
         try:
-            order_result = self._alpaca.submit_market_order(pair, qty, "BUY")
-            fill = await self._alpaca.wait_for_fill(order_result["order_id"])
+            logger.info("submitting_buy", pair=pair, qty=str(qty), notional=notional)
+            order_result = await asyncio.to_thread(self._exchange.submit_market_order, pair, qty, "BUY")
+            self.think(f"📤 Order submitted {pair} BUY — id={order_result['order_id'][:8]}... waiting for fill")
+            fill = await self._exchange.wait_for_fill(order_result["order_id"])
 
             filled_price = fill.get("filled_avg_price", price)
             filled_qty = fill.get("filled_qty", float(qty))
+            fill_status = fill.get("status", "unknown")
             slippage_bps = ((filled_price - price) / price * 10000) if price > 0 else 0
+
+            self.think(f"✅ FILLED {pair} BUY: {filled_qty} @ ${filled_price:,.2f} (status={fill_status}, slip={slippage_bps:.1f}bps)")
 
             await self._record_trade(
                 pair=pair,
@@ -109,7 +118,8 @@ class OrderExecutorAgent(BaseAgent):
             }
 
         except Exception as e:
-            logger.exception("buy_failed", pair=pair)
+            logger.exception("buy_failed", pair=pair, error=str(e))
+            self.think(f"❌ BUY FAILED {pair}: {e}")
             await self._telegram.error_alert("Buy Failed", f"{pair}: {e}")
             return {"status": "error", "pair": pair, "error": str(e)}
 
@@ -127,11 +137,15 @@ class OrderExecutorAgent(BaseAgent):
             qty = position.qty
             entry_price = position.avg_entry_price
 
-            order_result = self._alpaca.submit_market_order(pair, qty, "SELL")
-            fill = await self._alpaca.wait_for_fill(order_result["order_id"])
+            logger.info("submitting_sell", pair=pair, qty=str(qty))
+            order_result = await asyncio.to_thread(self._exchange.submit_market_order, pair, qty, "SELL")
+            self.think(f"📤 Order submitted {pair} SELL — id={order_result['order_id'][:8]}... waiting for fill")
+            fill = await self._exchange.wait_for_fill(order_result["order_id"])
 
             filled_price = fill.get("filled_avg_price", 0)
             filled_qty = fill.get("filled_qty", float(qty))
+            fill_status = fill.get("status", "unknown")
+            self.think(f"✅ FILLED {pair} SELL: {filled_qty} @ ${filled_price:,.2f} (status={fill_status})")
 
             pnl = Decimal(str(filled_price)) * Decimal(str(filled_qty)) - entry_price * qty
             pnl_pct = float(pnl / (entry_price * qty) * 100) if entry_price * qty > 0 else 0
@@ -167,7 +181,8 @@ class OrderExecutorAgent(BaseAgent):
             }
 
         except Exception as e:
-            logger.exception("sell_failed", pair=pair)
+            logger.exception("sell_failed", pair=pair, error=str(e))
+            self.think(f"❌ SELL FAILED {pair}: {e}")
             await self._telegram.error_alert("Sell Failed", f"{pair}: {e}")
             return {"status": "error", "pair": pair, "error": str(e)}
 

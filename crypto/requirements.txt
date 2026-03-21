@@ -13,8 +13,12 @@ alembic>=1.13
 # Redis
 redis>=5.0
 
-# Alpaca
+# Alpaca (kept for legacy reference)
 alpaca-py>=0.28
+pytz>=2024.1
+
+# Coinbase
+coinbase-advanced-py>=1.8
 
 # Technical Analysis
 numpy>=1.26

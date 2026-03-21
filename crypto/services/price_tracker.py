@@ -1,4 +1,4 @@
-"""Real-time crypto price tracker using Alpaca quotes + Redis cache."""
+"""Real-time crypto price tracker using exchange quotes + Redis cache."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import redis.asyncio as aioredis
 import structlog
 
 from config import get_settings
-from services.alpaca_crypto import AlpacaCryptoService
+from services.coinbase_crypto import CoinbaseCryptoService
 
 logger = structlog.get_logger(__name__)
 
@@ -20,10 +20,10 @@ PRICE_TTL_SEC = 120
 
 
 class PriceTracker:
-    """Polls Alpaca for latest quotes every tick and pushes to Redis."""
+    """Polls the exchange for latest quotes every tick and pushes to Redis."""
 
-    def __init__(self, alpaca: AlpacaCryptoService) -> None:
-        self._alpaca = alpaca
+    def __init__(self, exchange: CoinbaseCryptoService) -> None:
+        self._exchange = exchange
         settings = get_settings()
         self._pairs = settings.crypto.pair_list
         self._redis: aioredis.Redis | None = None
@@ -37,7 +37,7 @@ class PriceTracker:
     async def fetch_and_cache(self) -> dict[str, dict]:
         """Fetch latest prices and store in Redis hash. Returns the price data."""
         try:
-            quotes = self._alpaca.get_latest_quotes(self._pairs)
+            quotes = self._exchange.get_latest_quotes(self._pairs)
         except Exception:
             logger.exception("price_fetch_failed")
             return {}

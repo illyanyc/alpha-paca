@@ -38,7 +38,7 @@ class RiskValidatorAgent(BaseAgent):
         portfolio = kwargs.get("portfolio_state", {})
 
         if decision.get("action") == "SELL":
-            logger.info("risk_approved", pair=decision.get("pair"), action="SELL")
+            self.think(f"🛡️ {decision.get('pair')} SELL — auto-approved (exit)")
             return {"approved": True, "reasons": ""}
 
         checks = []
@@ -53,18 +53,13 @@ class RiskValidatorAgent(BaseAgent):
 
         if failures:
             reasons = "; ".join(f.reason for f in failures)
-            logger.warning(
-                "risk_rejected",
-                pair=decision.get("pair"),
-                action=decision.get("action"),
-                reasons=reasons,
-            )
+            self.think(f"🛡️ {decision.get('pair')} {decision.get('action')} REJECTED: {reasons}")
             return {"approved": False, "reasons": reasons}
 
         if decision.get("action") in ("BUY", "SELL"):
             self._last_trade_times[decision["pair"]] = datetime.now(timezone.utc)
 
-        logger.info("risk_approved", pair=decision.get("pair"), action=decision.get("action"))
+        self.think(f"🛡️ {decision.get('pair')} {decision.get('action')} — approved (all 5 checks passed)")
         return {"approved": True, "reasons": ""}
 
     def _check_drawdown(self, portfolio: dict) -> RiskCheckResult:

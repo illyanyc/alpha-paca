@@ -10,7 +10,7 @@ import structlog
 from agents.base import BaseAgent
 from config import get_settings
 from engine.signals import ComponentSignal, SignalStrength
-from services.alpaca_crypto import AlpacaCryptoService
+from services.coinbase_crypto import CoinbaseCryptoService
 
 logger = structlog.get_logger(__name__)
 
@@ -21,20 +21,22 @@ FUND_SIGNAL_TTL = 600
 class FundamentalAnalystAgent(BaseAgent):
     name = "fundamental_analyst"
 
-    def __init__(self, alpaca: AlpacaCryptoService) -> None:
+    def __init__(self, exchange: CoinbaseCryptoService) -> None:
         super().__init__()
-        self._alpaca = alpaca
+        self._exchange = exchange
 
     async def run(self, **kwargs) -> dict:
         settings = get_settings()
         pairs = settings.crypto.pair_list
         results: dict[str, dict] = {}
 
+        self.think(f"Analyzing volume & price structure for {len(pairs)} pairs...")
+
         btc_price: float | None = None
 
         for pair in pairs:
             try:
-                bars = self._alpaca.get_bars(pair, lookback_minutes=1440)
+                bars = self._exchange.get_bars(pair, lookback_minutes=1440)
                 if len(bars) < 30:
                     continue
 
@@ -82,16 +84,16 @@ class FundamentalAnalystAgent(BaseAgent):
                     reasons.append(f"Downtrend vs 30d")
 
                 score = max(-1.0, min(1.0, score))
-                confidence = min(1.0, abs(score) * 1.2)
+                confidence = min(1.0, abs(score) * 1.5 + 0.1)
 
-                if score >= 0.4:
-                    sig = SignalStrength.BUY
-                elif score >= 0.6:
+                if score >= 0.5:
                     sig = SignalStrength.STRONG_BUY
-                elif score <= -0.4:
-                    sig = SignalStrength.SELL
-                elif score <= -0.6:
+                elif score >= 0.15:
+                    sig = SignalStrength.BUY
+                elif score <= -0.5:
                     sig = SignalStrength.STRONG_SELL
+                elif score <= -0.15:
+                    sig = SignalStrength.SELL
                 else:
                     sig = SignalStrength.NEUTRAL
 
@@ -107,6 +109,9 @@ class FundamentalAnalystAgent(BaseAgent):
 
             except Exception:
                 logger.exception("fundamental_analysis_failed", pair=pair)
+
+        fund_summary = ", ".join(f"{p}: {d['signal']}({d['score']:.2f})" for p, d in results.items())
+        self.think(f"Fundamentals: {fund_summary}")
 
         r = await self._get_redis()
         await r.set(FUND_SIGNAL_KEY, json.dumps(results), ex=FUND_SIGNAL_TTL)

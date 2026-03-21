@@ -153,8 +153,8 @@ class AlpacaCryptoService:
         """Poll until order is filled or timeout."""
         deadline = asyncio.get_event_loop().time() + timeout_sec
         while asyncio.get_event_loop().time() < deadline:
-            info = self.get_order(order_id)
+            info = await asyncio.to_thread(self.get_order, order_id)
             if info["status"] in ("filled", "partially_filled"):
                 return info
             await asyncio.sleep(1)
-        return self.get_order(order_id)
+        return await asyncio.to_thread(self.get_order, order_id)

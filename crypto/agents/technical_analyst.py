@@ -11,7 +11,7 @@ from agents.base import BaseAgent
 from config import get_settings
 from engine.indicators import compute_all
 from engine.signals import ComponentSignal, classify_technical
-from services.alpaca_crypto import AlpacaCryptoService
+from services.coinbase_crypto import CoinbaseCryptoService
 
 logger = structlog.get_logger(__name__)
 
@@ -22,20 +22,21 @@ TECH_SIGNAL_TTL = 120
 class TechnicalAnalystAgent(BaseAgent):
     name = "technical_analyst"
 
-    def __init__(self, alpaca: AlpacaCryptoService) -> None:
+    def __init__(self, exchange: CoinbaseCryptoService) -> None:
         super().__init__()
-        self._alpaca = alpaca
+        self._exchange = exchange
 
     async def run(self, **kwargs) -> dict:
         settings = get_settings()
         pairs = settings.crypto.pair_list
         results: dict[str, dict] = {}
 
+        self.think(f"Computing indicators for {len(pairs)} pairs...")
+
         for pair in pairs:
             try:
-                bars = self._alpaca.get_bars(pair, lookback_minutes=120)
+                bars = self._exchange.get_bars(pair, lookback_minutes=120)
                 if not bars:
-                    logger.warning("no_bars", pair=pair)
                     continue
 
                 indicators = compute_all(bars)
@@ -50,6 +51,9 @@ class TechnicalAnalystAgent(BaseAgent):
                 }
             except Exception:
                 logger.exception("technical_analysis_failed", pair=pair)
+
+        signals_summary = ", ".join(f"{p}: {d['signal']}({d['score']:.1f})" for p, d in results.items())
+        self.think(f"Tech: {signals_summary}")
 
         r = await self._get_redis()
         await r.set(TECH_SIGNAL_KEY, json.dumps(results), ex=TECH_SIGNAL_TTL)

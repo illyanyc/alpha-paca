@@ -74,6 +74,8 @@ class BaseAgent(ABC):
                 )
                 return {"error": "circuit_open", "agent": self.name}
 
+        self._update_status("running")
+
         try:
             await self.heartbeat()
             result = await self.run(**kwargs)
@@ -143,6 +145,18 @@ class BaseAgent(ABC):
     def _update_status(self, status: str) -> None:
         if _state_ref and "agent_statuses" in _state_ref:
             _state_ref["agent_statuses"][self.name] = status
+
+    def think(self, step: str) -> None:
+        """Emit an agent thinking/decision step to the live log."""
+        if not _state_ref:
+            return
+        log = _state_ref.setdefault("agent_log", [])
+        log.append({
+            "agent": self.name,
+            "step": step,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        _state_ref["agent_log"] = log[-50:]
 
     def _push_healing_status(self, message: str) -> None:
         if not _state_ref:

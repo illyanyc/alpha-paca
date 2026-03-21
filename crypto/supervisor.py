@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HEARTBEAT_KEY = "crypto:heartbeat"
-HEALTH_CHECK_INTERVAL = 10
-HEARTBEAT_STALE_SEC = 30
+HEALTH_CHECK_INTERVAL = 15
+HEARTBEAT_STALE_SEC = 90
 MAX_BACKOFF_SEC = 300
 BACKOFF_STEPS = [5, 15, 60, 120, 300]
 

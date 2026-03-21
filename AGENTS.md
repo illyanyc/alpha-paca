@@ -25,25 +25,28 @@
 
 ## Learned User Preferences
 - Slider + editable number input for all numeric settings in the dashboard
-- Hot-swappable settings stored in PostgreSQL, cached in Redis, env vars as initial defaults
+- Hot-swappable settings stored in Redis with env vars as initial defaults — must persist across Railway redeploys
 - Railway Postgres for local development (not a local Docker instance)
 - AI agents should use PydanticAI with structured output (Pydantic models)
 - Prefer agentic swarm patterns with orchestrators, validators, and executors
-- Terminal-only services (no dashboard) are acceptable for standalone trading services
 - Telegram integration for real-time trade alerts and daily P&L reports
 - When fetching Alpaca crypto market data, use no-auth client (free tier)
 - Commit and push frequently to prevent data loss
+- NEVER default to paper trading — always default `ALPACA_PAPER=false` (LIVE mode) in code, env, and dashboard
+- Show Alpaca API key status (valid/rejected/unauthorized) in the web dashboard
+- Stream agent thinking steps and decisions in real-time in both terminal and web UI
+- Always run tests before deploying to Railway
 
 ## Learned Workspace Facts
 - `backend/` contains the main FastAPI stock-trading platform
 - `dashboard/` contains the Next.js management dashboard
-- `crypto/` is a standalone autonomous crypto trading service (agent swarm, terminal-only)
+- `crypto/` is a standalone autonomous crypto trading service with web dashboard (FastAPI-served inline HTML/JS)
 - `crypto/` reads env vars from parent `../.env.local` and shares the same Railway Postgres and Redis
 - Alpaca crypto is long-only (no short selling) — bearish signals sell to cash instead
 - Alpaca crypto data (quotes, bars) works without authentication; trading requires API keys
-- Alpaca API keys may expire — handle 401 errors gracefully with fallback defaults
+- Alpaca API keys may expire — handle 401 errors gracefully; paper keys only work with `paper=true`, live keys with `paper=false`
 - All crypto DB tables are prefixed `crypto_` to coexist with stock tables in the same database
 - `crypto/supervisor.py` is the entry point — spawns `main.py` with Redis heartbeat monitoring
 - DB tables are created via `create_tables.py` scripts (not Alembic migrations)
-- The `alpaca-py` BarSet object requires subscript access (`result["BTC/USD"]`), not `.get()`
-- Dashboard API base URL uses `NEXT_PUBLIC_API_URL` env var with `/api` suffix
+- The `alpaca-py` BarSet object requires subscript access (`result["BTC/USD"]`), not `.get()`; `pytz` is an undeclared dependency of `alpaca-py` — must be in requirements
+- `crypto/engine/` contains strategies (momentum_breakout, mean_reversion, scalp_micro, trend_rider), backtester (hourly walk-forward), and adaptive learner (EMA-scored live trade outcomes)

@@ -66,6 +66,18 @@ def volume_sma(volumes: pd.Series, period: int = 20) -> pd.Series:
     return volumes.rolling(window=period).mean()
 
 
+def williams_r(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14) -> pd.Series:
+    """Williams %R oscillator (-100 to 0)."""
+    highest = highs.rolling(window=period).max()
+    lowest = lows.rolling(window=period).min()
+    wr = -100 * (highest - closes) / (highest - lowest).replace(0, np.nan)
+    return wr
+
+
+def ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+
 def compute_all(bars: list[dict]) -> dict[str, float | None]:
     """Compute all indicators from a list of OHLCV bar dicts.
 
@@ -76,6 +88,8 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
             "rsi": None, "macd_line": None, "macd_signal": None, "macd_hist": None,
             "bb_upper": None, "bb_middle": None, "bb_lower": None,
             "vwap": None, "atr": None, "volume_sma": None,
+            "williams_r": None, "ema_9": None, "ema_21": None,
+            "momentum_5": None, "momentum_10": None,
         }
 
     df = pd.DataFrame(bars)
@@ -89,7 +103,12 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
     bb_u, bb_m, bb_lo = bollinger_bands(closes)
     vwap_val = vwap(highs, lows, closes, volumes)
     atr_val = atr(highs, lows, closes)
-    vol_sma = volume_sma(volumes)
+    vol_sma_val = volume_sma(volumes)
+    wr_val = williams_r(highs, lows, closes)
+    ema_9 = ema(closes, 9)
+    ema_21 = ema(closes, 21)
+    mom_5 = closes.pct_change(5)
+    mom_10 = closes.pct_change(10)
 
     def _last(series: pd.Series) -> float | None:
         val = series.iloc[-1]
@@ -105,7 +124,12 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
         "bb_lower": _last(bb_lo),
         "vwap": _last(vwap_val),
         "atr": _last(atr_val),
-        "volume_sma": _last(vol_sma),
+        "volume_sma": _last(vol_sma_val),
         "close": float(closes.iloc[-1]),
         "volume": float(volumes.iloc[-1]),
+        "williams_r": _last(wr_val),
+        "ema_9": _last(ema_9),
+        "ema_21": _last(ema_21),
+        "momentum_5": _last(mom_5),
+        "momentum_10": _last(mom_10),
     }

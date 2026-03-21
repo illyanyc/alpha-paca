@@ -273,7 +273,7 @@ def build_agent_status(agent_statuses: dict[str, str]) -> Panel:
         "order_executor": "⚡",
     }
     status_icons = {
-        "healthy": "🟢", "running": "🔵", "idle": "⚪",
+        "healthy": "🟢", "running": "🔵", "idle": "⚪", "standby": "🟣",
         "error": "🔴", "healing": "🟡", "circuit_open": "🔶",
     }
 

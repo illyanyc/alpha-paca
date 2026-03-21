@@ -18,7 +18,7 @@ async def run_paper_test():
     from db.engine import Base, async_session_factory, engine
     from db import models as _m  # noqa: F401
     from db.models import CryptoTrade, CryptoPosition
-    from services.alpaca_crypto import AlpacaCryptoService
+    from services.coinbase_crypto import CoinbaseCryptoService
     from services.price_tracker import PriceTracker
     from agents.technical_analyst import TechnicalAnalystAgent
     from agents.fundamental_analyst import FundamentalAnalystAgent
@@ -32,7 +32,7 @@ async def run_paper_test():
         f"[bold cyan]Paper Trade Test[/]\n"
         f"Pairs: {', '.join(settings.crypto.pair_list)}\n"
         f"Capital: ${settings.crypto.max_capital:,.0f}\n"
-        f"Paper: {settings.alpaca.paper}",
+        f"Exchange: Coinbase",
         border_style="cyan",
     ))
 
@@ -42,8 +42,8 @@ async def run_paper_test():
     console.print("[green]✓[/] DB tables ready")
 
     # 2 — Fetch live prices
-    alpaca = AlpacaCryptoService()
-    pt = PriceTracker(alpaca)
+    exchange = CoinbaseCryptoService()
+    pt = PriceTracker(exchange)
     prices = await pt.fetch_and_cache()
     console.print(f"[green]✓[/] Fetched {len(prices)} live quotes")
 
@@ -56,12 +56,12 @@ async def run_paper_test():
     console.print(price_table)
 
     # 3 — Technical analysis
-    tech = TechnicalAnalystAgent(alpaca)
+    tech = TechnicalAnalystAgent(exchange)
     tech_result = await tech.safe_run()
     console.print(f"[green]✓[/] Technical analysis: {len(tech_result)} pairs")
 
     # 4 — Fundamental analysis
-    fund = FundamentalAnalystAgent(alpaca)
+    fund = FundamentalAnalystAgent(exchange)
     fund_result = await fund.safe_run()
     console.print(f"[green]✓[/] Fundamental analysis: {len(fund_result)} pairs")
 

@@ -62,6 +62,7 @@ class NewsScoutAgent(BaseAgent):
         settings = get_settings()
         pairs = settings.crypto.pair_list
 
+        self.think(f"Scanning news for {len(pairs)} pairs...")
         raw_news = await self._news_client.fetch_crypto_news(pairs)
 
         all_articles = []
@@ -70,8 +71,10 @@ class NewsScoutAgent(BaseAgent):
                 all_articles.append(f"[{a.get('title', '')}] {a.get('snippet', a.get('content', ''))[:300]}")
 
         if not all_articles:
-            logger.info("no_news_found")
+            self.think("No news articles found")
             return {"articles": [], "overall_sentiment": "neutral", "overall_score": 0.0}
+
+        self.think(f"Found {len(all_articles)} articles, sending to AI for analysis...")
 
         prompt = (
             f"Analyze these {len(all_articles)} crypto news articles. "
@@ -84,6 +87,8 @@ class NewsScoutAgent(BaseAgent):
 
         r = await self._get_redis()
         await r.set(NEWS_CACHE_KEY, analysis.model_dump_json(), ex=NEWS_CACHE_TTL)
+
+        self.think(f"News: {analysis.overall_sentiment} (score={analysis.overall_score:.2f}), {len(analysis.key_events)} key events")
 
         logger.info(
             "news_analysis_complete",
