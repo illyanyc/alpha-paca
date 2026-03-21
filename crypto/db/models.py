@@ -23,7 +23,7 @@ class CryptoTrade(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pair: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    side: Mapped[str] = mapped_column(String(10), nullable=False)  # BUY / SELL
+    side: Mapped[str] = mapped_column(String(10), nullable=False)  # BUY / SELL / SHORT / COVER
     qty: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
     entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
     exit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
@@ -43,6 +43,7 @@ class CryptoPosition(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pair: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, index=True)
+    side: Mapped[str] = mapped_column(String(10), nullable=False, default="long")  # long / short
     qty: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=0)
     avg_entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
     current_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=0)

@@ -24,7 +24,7 @@ STRATEGY_SIGNALS_KEY = "crypto:signals:strategies"
 
 
 class TradeDecision(BaseModel):
-    action: str  # BUY / SELL / HOLD
+    action: str  # BUY / SELL / SHORT / COVER / HOLD
     pair: str
     size_pct: float  # % of capital to allocate
     confidence: float  # 0.0 to 1.0
@@ -54,36 +54,47 @@ class OrchestratorAgent(BaseAgent):
         self._agent = Agent(
             "anthropic:claude-sonnet-4-20250514",
             instructions=(
-                "You are an AGGRESSIVE crypto portfolio manager. Deploy capital or protect it.\n\n"
+                "You are an AGGRESSIVE crypto portfolio manager. Profit in ALL market conditions.\n\n"
                 "You receive technical, fundamental, news, and strategy signals for each pair. "
-                "Decide BUY / SELL / HOLD with position sizing.\n\n"
-                "## POSITION SEMANTICS (Coinbase spot — long-only)\n"
-                "- BUY = enter or add to a LONG position (you own the crypto)\n"
-                "- SELL = EXIT an existing long position back to USD (not shorting)\n"
-                "- HOLD = no change to current position\n\n"
-                "## WHEN TO BUY\n"
+                "Decide BUY / SELL / SHORT / COVER / HOLD with position sizing.\n\n"
+                "## ACTIONS (5 actions available)\n"
+                "- **BUY** = Open or add to a LONG position (profit when price rises)\n"
+                "- **SELL** = Close/exit an existing LONG position back to USD\n"
+                "- **SHORT** = Open a SHORT position via futures (profit when price drops)\n"
+                "- **COVER** = Close/exit an existing SHORT position\n"
+                "- **HOLD** = No change\n\n"
+                "## WHEN TO BUY (go long)\n"
                 f"- Confidence threshold: {self._confidence_threshold}\n"
-                "- If 2+ signal sources (tech, fundamental, news, strategies) are bullish → BUY.\n"
-                "- If all sources agree bullish → confidence >= 0.8, size 15-25%.\n"
-                "- If 2 sources agree → confidence >= 0.6, size 5-15%.\n"
-                "- When macro is neutral-to-bullish, deploy at least 30-50% of capital.\n"
-                "- Idle cash earns nothing. Prefer small positions over none.\n\n"
-                "## WHEN TO SELL (EXIT)\n"
-                "- You MUST output SELL for a pair if you hold a position AND:\n"
-                "  * Technical signal is SELL or STRONG_SELL (bearish indicators)\n"
-                "  * Fundamental signal is SELL or STRONG_SELL\n"
-                "  * News is bearish with score < -0.3\n"
-                "  * 2+ signal sources turn negative on a held pair\n"
-                "  * Unrealized PnL is worse than -3% (stop-loss territory)\n"
-                "  * Unrealized PnL exceeds +8% and signals are weakening (take-profit)\n"
-                "- SELL decisions should have confidence >= 0.5 — be DECISIVE about exits.\n"
-                "- Protecting capital from drawdowns is as important as entering trades.\n"
-                "- If you have NO position in a pair and signals are bearish, output HOLD.\n\n"
-                "## GENERAL\n"
-                "- Check 'Current Positions' to know what you hold. Only SELL pairs you own.\n"
-                "- Only BUY pairs with no/small position when signals are bullish.\n"
-                "- Size proportionally: high conviction = 15-25%, moderate = 5-15%.\n"
-                "- Provide clear reasoning for every decision.\n"
+                "- 2+ signal sources bullish AND you have NO existing long → BUY.\n"
+                "- All sources agree bullish → confidence >= 0.8, size 15-25%.\n"
+                "- 2 sources agree → confidence >= 0.6, size 5-15%.\n"
+                "- When macro is neutral-to-bullish, deploy capital in the strongest pairs.\n\n"
+                "## WHEN TO SELL (close long)\n"
+                "- You hold a LONG position AND:\n"
+                "  * Tech is SELL/STRONG_SELL, or 2+ sources turn bearish\n"
+                "  * Unrealized PnL worse than -3% (stop-loss) or better than +8% with weakening signals\n"
+                "- Be DECISIVE about protecting profits and cutting losses.\n\n"
+                "## WHEN TO SHORT (go short — profit from drops)\n"
+                "- You have NO existing position (long or short) AND:\n"
+                "  * 2+ signal sources are bearish (SELL/STRONG_SELL signals)\n"
+                "  * News is negative (score < -0.3)\n"
+                "  * Technical indicators show clear downtrend\n"
+                "- Size: 5-15% for moderate conviction, 15-25% for strong conviction.\n"
+                "- Shorting is how you PROFIT in bear markets — use it aggressively.\n\n"
+                "## WHEN TO COVER (close short)\n"
+                "- You hold a SHORT position AND:\n"
+                "  * Signals turn bullish (2+ sources flipping positive)\n"
+                "  * Short PnL is profitable and signals weakening (take profit)\n"
+                "  * Short PnL exceeds loss threshold (stop loss on short)\n\n"
+                "## STRATEGY\n"
+                "- In BULL markets: mostly BUY, close losers with SELL.\n"
+                "- In BEAR markets: mostly SHORT, close losers with COVER.\n"
+                "- In MIXED markets: hold both longs AND shorts on different pairs.\n"
+                "- NEVER sit 100% in cash — always have some directional exposure.\n"
+                "- Check 'Current Positions' to see what you hold and its side (long/short).\n"
+                "- Only SELL longs you own. Only COVER shorts you hold.\n"
+                "- Do NOT BUY if you already have a SHORT on the same pair (COVER first).\n"
+                "- Do NOT SHORT if you already have a LONG on the same pair (SELL first).\n"
                 "- DO NOT default everything to HOLD — that is failure.\n\n"
                 f"{skill_text}"
             ),
@@ -197,23 +208,30 @@ class OrchestratorAgent(BaseAgent):
             )
 
         if positions:
-            pos_lines = ["## Current Positions (YOU HOLD THESE — only SELL what you hold)"]
+            pos_lines = ["## Current Positions"]
             for p in positions:
                 pair_name = p.get('pair', p.get('symbol', '?'))
+                side = p.get('side', 'long').upper()
                 entry = float(p.get('avg_entry_price', 0))
                 current = float(p.get('current_price', 0))
                 unrealized = float(p.get('unrealized_pnl', p.get('unrealized_pl', 0)))
-                pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
+                pnl_pct = float(p.get('unrealized_pnl_pct', 0))
+                if pnl_pct == 0 and entry > 0:
+                    if side == "SHORT":
+                        pnl_pct = ((entry - current) / entry * 100)
+                    else:
+                        pnl_pct = ((current - entry) / entry * 100)
                 mv = float(p.get('market_value_usd', p.get('market_value', 0)))
                 pos_lines.append(
-                    f"- {pair_name}: qty={p.get('qty', 0)}, "
+                    f"- {pair_name} [{side}]: qty={p.get('qty', 0)}, "
                     f"entry=${entry:,.2f}, current=${current:,.2f}, "
                     f"PnL=${unrealized:+,.2f} ({pnl_pct:+.1f}%), "
                     f"market_value=${mv:,.2f}"
                 )
+            pos_lines.append("→ SELL to close LONGs, COVER to close SHORTs.")
             sections.append("\n".join(pos_lines))
         else:
-            sections.append("## Current Positions\nNONE — all cash. Look for BUY opportunities.")
+            sections.append("## Current Positions\nNONE — all cash. Look for BUY or SHORT opportunities.")
 
         if tech:
             tech_lines = ["## Technical Signals"]
@@ -285,15 +303,16 @@ class OrchestratorAgent(BaseAgent):
             sections.append("\n".join(lr_lines))
 
         sections.append(
-            f"\nMake BUY/SELL/HOLD decisions for each pair.\n"
+            f"\nMake BUY/SELL/SHORT/COVER/HOLD decisions for each pair.\n"
             f"Confidence threshold: {self._confidence_threshold}.\n"
-            f"BUY: any pair where signals are net positive and you have no/small position.\n"
-            f"SELL: any HELD pair where signals turned negative, PnL exceeds stop/target, "
-            f"or 2+ signal sources are bearish. Be decisive about protecting capital.\n"
-            f"HOLD: only when no strong signal in either direction.\n"
+            f"BUY: bullish signals, no existing position → go long.\n"
+            f"SELL: close an existing LONG when signals turn bearish or PnL hits stop/target.\n"
+            f"SHORT: bearish signals, no existing position → profit from the drop.\n"
+            f"COVER: close an existing SHORT when signals turn bullish or PnL hits stop/target.\n"
+            f"HOLD: only when signals are genuinely flat.\n"
             f"Weight confidence using strategy signals and backtest results. "
-            f"If multiple backtested strategies agree on BUY, boost confidence. "
-            f"DO NOT default to HOLD — deploy or protect aggressively."
+            f"In bear markets, SHORT aggressively — don't just sit in cash. "
+            f"DO NOT default to HOLD — always take a directional view."
         )
 
         return "\n\n".join(sections)

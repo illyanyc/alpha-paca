@@ -16,6 +16,7 @@ import structlog
 import uvicorn
 from rich.console import Console
 from rich.live import Live
+import sqlalchemy
 from sqlalchemy import select
 
 from agents.base import set_healer, set_state_ref
@@ -174,19 +175,23 @@ async def create_tables() -> None:
     from db import models as _m  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    async with engine.begin() as conn:
+        await conn.execute(
+            sqlalchemy.text(
+                "ALTER TABLE crypto_positions ADD COLUMN IF NOT EXISTS side VARCHAR(10) NOT NULL DEFAULT 'long'"
+            )
+        )
 
 
 async def enrich_positions(exchange_positions: list[dict]) -> list[dict]:
     """Cross-reference exchange holdings with DB entry prices for accurate PnL."""
-    if not exchange_positions:
-        return []
-
     async with async_session_factory() as session:
         stmt = select(CryptoPosition)
         result = await session.execute(stmt)
         db_positions = {p.pair: p for p in result.scalars().all()}
 
     enriched = []
+
     for ep in exchange_positions:
         pair = ep.get("symbol", ep.get("pair", ""))
         current_price = float(ep.get("current_price", 0))
@@ -195,16 +200,24 @@ async def enrich_positions(exchange_positions: list[dict]) -> list[dict]:
         db_pos = db_positions.get(pair)
         if db_pos and db_pos.avg_entry_price > 0:
             entry_price = float(db_pos.avg_entry_price)
+            side = db_pos.side or "long"
         else:
             entry_price = current_price
+            side = "long"
 
-        unrealized_pnl = (current_price - entry_price) * qty
-        unrealized_pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+        if side == "short":
+            unrealized_pnl = (entry_price - current_price) * qty
+            unrealized_pnl_pct = ((entry_price - current_price) / entry_price * 100) if entry_price > 0 else 0
+        else:
+            unrealized_pnl = (current_price - entry_price) * qty
+            unrealized_pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+
         market_value = qty * current_price
 
         enriched.append({
             **ep,
             "pair": pair,
+            "side": side,
             "avg_entry_price": entry_price,
             "current_price": current_price,
             "unrealized_pnl": unrealized_pnl,
@@ -213,6 +226,26 @@ async def enrich_positions(exchange_positions: list[dict]) -> list[dict]:
             "market_value": market_value,
             "market_value_usd": market_value,
         })
+
+    for pair, db_pos in db_positions.items():
+        if db_pos.side == "short" and db_pos.qty > 0:
+            already = any(e["pair"] == pair for e in enriched)
+            if not already:
+                entry_price = float(db_pos.avg_entry_price)
+                current_price = float(db_pos.current_price)
+                qty = float(db_pos.qty)
+                unrealized_pnl = (entry_price - current_price) * qty
+                unrealized_pnl_pct = ((entry_price - current_price) / entry_price * 100) if entry_price > 0 else 0
+                enriched.append({
+                    "pair": pair, "symbol": pair, "side": "short",
+                    "qty": qty, "avg_entry_price": entry_price,
+                    "current_price": current_price,
+                    "unrealized_pnl": unrealized_pnl,
+                    "unrealized_pl": unrealized_pnl,
+                    "unrealized_pnl_pct": unrealized_pnl_pct,
+                    "market_value": qty * current_price,
+                    "market_value_usd": qty * current_price,
+                })
 
     return enriched
 
@@ -238,6 +271,8 @@ async def sync_positions_to_db(enriched_positions: list[dict]) -> None:
             mv = D(str(ep.get("market_value_usd", 0)))
             pnl = D(str(ep.get("unrealized_pnl", 0)))
 
+            side = ep.get("side", "long")
+
             if pair in db_map:
                 pos = db_map[pair]
                 pos.current_price = current_price
@@ -246,9 +281,11 @@ async def sync_positions_to_db(enriched_positions: list[dict]) -> None:
                 if pos.qty == 0 and qty > 0:
                     pos.qty = qty
                     pos.avg_entry_price = entry_price
+                    pos.side = side
             else:
                 session.add(CryptoPosition(
                     pair=pair,
+                    side=side,
                     qty=qty,
                     avg_entry_price=entry_price,
                     current_price=current_price,
@@ -257,7 +294,7 @@ async def sync_positions_to_db(enriched_positions: list[dict]) -> None:
                 ))
 
         for db_pair, db_pos in db_map.items():
-            if db_pair not in exchange_pairs:
+            if db_pair not in exchange_pairs and db_pos.side != "short":
                 db_pos.qty = D(0)
                 db_pos.current_price = D(0)
                 db_pos.market_value_usd = D(0)
@@ -377,31 +414,34 @@ async def check_protective_exits(
                 pair = pos.get("pair", pos.get("symbol", ""))
                 pnl_pct = float(pos.get("unrealized_pnl_pct", 0))
                 qty = float(pos.get("qty", 0))
+                side = pos.get("side", "long")
                 if qty <= 0 or not pair:
                     continue
 
+                exit_action = "COVER" if side == "short" else "SELL"
+
                 if pnl_pct <= -settings.crypto.stop_loss_pct:
                     logger.warning(
-                        "stop_loss_triggered", pair=pair, pnl_pct=pnl_pct,
-                        threshold=-settings.crypto.stop_loss_pct,
+                        "stop_loss_triggered", pair=pair, side=side,
+                        pnl_pct=pnl_pct, threshold=-settings.crypto.stop_loss_pct,
                     )
                     await executor.safe_run(
-                        decision={"action": "SELL", "pair": pair, "size_pct": 100,
+                        decision={"action": exit_action, "pair": pair, "size_pct": 100,
                                   "confidence": 0.99,
-                                  "reasoning": f"STOP-LOSS: {pnl_pct:.1f}% loss exceeds -{settings.crypto.stop_loss_pct}% limit"},
+                                  "reasoning": f"STOP-LOSS ({side}): {pnl_pct:.1f}% loss exceeds -{settings.crypto.stop_loss_pct}% limit"},
                         price=float(pos.get("current_price", 0)),
                         available_capital=0,
                     )
 
                 elif pnl_pct >= settings.crypto.take_profit_pct:
                     logger.info(
-                        "take_profit_triggered", pair=pair, pnl_pct=pnl_pct,
-                        threshold=settings.crypto.take_profit_pct,
+                        "take_profit_triggered", pair=pair, side=side,
+                        pnl_pct=pnl_pct, threshold=settings.crypto.take_profit_pct,
                     )
                     await executor.safe_run(
-                        decision={"action": "SELL", "pair": pair, "size_pct": 100,
+                        decision={"action": exit_action, "pair": pair, "size_pct": 100,
                                   "confidence": 0.95,
-                                  "reasoning": f"TAKE-PROFIT: {pnl_pct:.1f}% gain exceeds +{settings.crypto.take_profit_pct}% target"},
+                                  "reasoning": f"TAKE-PROFIT ({side}): {pnl_pct:.1f}% gain exceeds +{settings.crypto.take_profit_pct}% target"},
                         price=float(pos.get("current_price", 0)),
                         available_capital=0,
                     )

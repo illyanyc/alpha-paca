@@ -32,9 +32,10 @@ Any of the following triggers a SELL:
 - Never exceed max_position_pct per pair
 - Scale confidence into size: higher confidence = larger position (within limits)
 
-## Coinbase Spot Constraints
-- **LONG ONLY**: No short selling on Coinbase spot
-- SELL = exit position completely (go to cash/USD)
+## Coinbase Trading
+- **LONG**: BUY to open, SELL to close (spot trading)
+- **SHORT**: SHORT to open, COVER to close (futures trading — profit from drops)
+- Profit in ALL market conditions: go long in bull, short in bear
 - BUY = enter or add to a long position
 - HOLD = maintain current position
 

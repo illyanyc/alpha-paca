@@ -69,6 +69,37 @@ async def test_sell_always_approved(risk_agent):
 
 
 @pytest.mark.asyncio
+async def test_cover_always_approved(risk_agent):
+    result = await risk_agent.run(
+        decision={"action": "COVER", "pair": "BTC/USD", "size_pct": 0, "confidence": 0.8},
+        positions=[],
+        portfolio_state={"nav": 1000, "cash": 1000, "total_exposure_pct": 80, "drawdown_pct": 12},
+    )
+    assert result["approved"] is True
+
+
+@pytest.mark.asyncio
+async def test_approve_valid_short(risk_agent):
+    result = await risk_agent.run(
+        decision={"action": "SHORT", "pair": "BTC/USD", "size_pct": 10, "confidence": 0.8},
+        positions=[],
+        portfolio_state={"nav": 1000, "cash": 1000, "total_exposure_pct": 0, "drawdown_pct": 0},
+    )
+    assert result["approved"] is True
+
+
+@pytest.mark.asyncio
+async def test_reject_short_exposure_breach(risk_agent):
+    result = await risk_agent.run(
+        decision={"action": "SHORT", "pair": "ETH/USD", "size_pct": 50, "confidence": 0.8},
+        positions=[],
+        portfolio_state={"nav": 1000, "cash": 1000, "total_exposure_pct": 60, "drawdown_pct": 0},
+    )
+    assert result["approved"] is False
+    assert "Exposure" in result["reasons"]
+
+
+@pytest.mark.asyncio
 async def test_anti_churn(risk_agent):
     # First trade — should pass
     r1 = await risk_agent.run(

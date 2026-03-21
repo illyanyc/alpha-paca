@@ -37,8 +37,10 @@ class RiskValidatorAgent(BaseAgent):
         positions = kwargs.get("positions", [])
         portfolio = kwargs.get("portfolio_state", {})
 
-        if decision.get("action") == "SELL":
-            self.think(f"🛡️ {decision.get('pair')} SELL — auto-approved (exit)")
+        action = decision.get("action", "")
+
+        if action in ("SELL", "COVER"):
+            self.think(f"🛡️ {decision.get('pair')} {action} — auto-approved (exit)")
             return {"approved": True, "reasons": ""}
 
         checks = []
@@ -53,13 +55,13 @@ class RiskValidatorAgent(BaseAgent):
 
         if failures:
             reasons = "; ".join(f.reason for f in failures)
-            self.think(f"🛡️ {decision.get('pair')} {decision.get('action')} REJECTED: {reasons}")
+            self.think(f"🛡️ {decision.get('pair')} {action} REJECTED: {reasons}")
             return {"approved": False, "reasons": reasons}
 
-        if decision.get("action") in ("BUY", "SELL"):
+        if action in ("BUY", "SELL", "SHORT", "COVER"):
             self._last_trade_times[decision["pair"]] = datetime.now(timezone.utc)
 
-        self.think(f"🛡️ {decision.get('pair')} {decision.get('action')} — approved (all 5 checks passed)")
+        self.think(f"🛡️ {decision.get('pair')} {action} — approved (all 5 checks passed)")
         return {"approved": True, "reasons": ""}
 
     def _check_drawdown(self, portfolio: dict) -> RiskCheckResult:
@@ -72,7 +74,7 @@ class RiskValidatorAgent(BaseAgent):
 
     def _check_exposure(self, decision: dict, portfolio: dict) -> RiskCheckResult:
         settings = get_settings()
-        if decision.get("action") != "BUY":
+        if decision.get("action") not in ("BUY", "SHORT"):
             return RiskCheckResult(True)
         current_exp = portfolio.get("total_exposure_pct", 0)
         new_exp = current_exp + decision.get("size_pct", 0)
@@ -86,7 +88,7 @@ class RiskValidatorAgent(BaseAgent):
 
     def _check_position_limit(self, decision: dict, positions: list) -> RiskCheckResult:
         settings = get_settings()
-        if decision.get("action") != "BUY":
+        if decision.get("action") not in ("BUY", "SHORT"):
             return RiskCheckResult(True)
         pair = decision.get("pair", "")
         size_pct = decision.get("size_pct", 0)
@@ -124,7 +126,7 @@ class RiskValidatorAgent(BaseAgent):
 
     def _check_correlation(self, decision: dict, positions: list) -> RiskCheckResult:
         """Basic correlation check — limit highly correlated crypto exposure."""
-        if decision.get("action") != "BUY":
+        if decision.get("action") not in ("BUY", "SHORT"):
             return RiskCheckResult(True)
 
         correlated_groups = {

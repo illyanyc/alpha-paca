@@ -81,14 +81,17 @@ def _snapshot() -> dict[str, Any]:
     positions = []
     for p in s.get("positions", []):
         pair = p.get("pair", p.get("symbol", "?"))
+        side = p.get("side", "long")
         qty = float(p.get("qty", 0))
         entry = float(p.get("avg_entry_price", 0))
         current = float(p.get("current_price", 0))
         pnl = float(p.get("unrealized_pnl", p.get("unrealized_pl", 0)))
-        pnl_pct = (pnl / (entry * qty) * 100) if entry * qty > 0 else 0
+        pnl_pct = float(p.get("unrealized_pnl_pct", 0))
+        if pnl_pct == 0 and entry * qty > 0:
+            pnl_pct = (pnl / (entry * qty) * 100)
         mv = float(p.get("market_value", qty * current))
         positions.append({
-            "pair": pair, "qty": qty, "entry": entry, "current": current,
+            "pair": pair, "side": side, "qty": qty, "entry": entry, "current": current,
             "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2), "value": round(mv, 2),
         })
 
@@ -418,7 +421,7 @@ tr:last-child td{border-bottom:none}
 <div class="section" id="positions-section" style="display:none">
 <div class="section-title">📦 Open Positions</div>
 <div style="overflow-x:auto"><table>
-<thead><tr><th>Pair</th><th class="r">Qty</th><th class="r">Entry</th><th class="r">Current</th><th class="r">P&L</th></tr></thead>
+<thead><tr><th>Pair</th><th>Side</th><th class="r">Qty</th><th class="r">Entry</th><th class="r">Current</th><th class="r">P&L</th></tr></thead>
 <tbody id="positions-body"></tbody>
 </table></div>
 </div>
@@ -566,7 +569,9 @@ function render(d) {
     posSection.style.display = '';
     let posHTML = '';
     d.positions.forEach(pos => {
-      posHTML += `<tr><td><b>${pos.pair}</b></td><td class="r">${pos.qty.toFixed(6)}</td>` +
+      const sideTag = (pos.side||'long').toUpperCase();
+      const sideCls = sideTag === 'SHORT' ? 'neg' : 'pos';
+      posHTML += `<tr><td><b>${pos.pair}</b></td><td class="${sideCls}" style="font-weight:600">${sideTag}</td><td class="r">${pos.qty.toFixed(6)}</td>` +
         `<td class="r">${fmt(pos.entry)}</td><td class="r">${fmt(pos.current)}</td>` +
         `<td class="r ${pnlClass(pos.pnl)}">$${pos.pnl >= 0 ? '+' : ''}${pos.pnl.toFixed(2)} (${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(1)}%)</td></tr>`;
     });

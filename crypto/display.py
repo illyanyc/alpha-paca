@@ -149,6 +149,7 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
             padding=(0, 1), expand=True,
         )
         pos_table.add_column("Pair", style="bold")
+        pos_table.add_column("Side", justify="center")
         pos_table.add_column("Qty", justify="right")
         pos_table.add_column("Entry", justify="right")
         pos_table.add_column("Current", justify="right")
@@ -158,15 +159,20 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
 
         for p in positions:
             pair = p.get("pair", p.get("symbol", "?"))
+            side = p.get("side", "long").upper()
+            side_style = "green" if side == "LONG" else "red"
             qty = p.get("qty", 0)
             entry = p.get("avg_entry_price", 0)
             current = p.get("current_price", 0)
             pnl = p.get("unrealized_pnl", p.get("unrealized_pl", 0))
-            pnl_pct = (pnl / (entry * qty) * 100) if entry * qty > 0 else 0
+            pnl_pct = float(p.get("unrealized_pnl_pct", 0))
+            if pnl_pct == 0 and entry > 0 and qty > 0:
+                pnl_pct = (pnl / (entry * qty) * 100)
             mv = p.get("market_value", p.get("market_value_usd", qty * current))
 
             pos_table.add_row(
                 pair,
+                f"[{side_style}]{side}[/]",
                 f"{qty:.6f}",
                 f"${entry:,.2f}",
                 f"${current:,.2f}",
