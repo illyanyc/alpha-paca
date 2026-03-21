@@ -183,9 +183,11 @@ class OrchestratorAgent(BaseAgent):
         strategy_signals: dict | None = None,
         learning: dict | None = None,
     ) -> str:
+        nav = portfolio.get("nav", 0) if portfolio else 0
+        cap_label = f"${nav:,.2f} (whole account)" if settings.crypto.max_capital <= 0 else f"${settings.crypto.max_capital:,.0f}"
         sections = [
             f"## Tracked Pairs: {', '.join(settings.crypto.pair_list)}",
-            f"## Capital: ${settings.crypto.max_capital:,.0f}",
+            f"## Capital: {cap_label}",
             f"## Max Position: {settings.crypto.max_position_pct}% | Max Exposure: {settings.crypto.max_total_exposure_pct}%",
         ]
 

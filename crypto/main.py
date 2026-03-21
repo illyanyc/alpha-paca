@@ -340,9 +340,10 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
         positions = await enrich_positions(raw_positions)
     except Exception as e:
         logger.warning("portfolio_state_fallback", error=str(e))
+        fallback_nav = settings.crypto.max_capital if settings.crypto.max_capital > 0 else 0
         return {
-            "nav": settings.crypto.max_capital,
-            "cash": settings.crypto.max_capital,
+            "nav": fallback_nav,
+            "cash": fallback_nav,
             "total_exposure_pct": 0,
             "unrealized_pnl": 0,
             "drawdown_pct": 0,
@@ -350,7 +351,9 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
         }
 
     total_mv = sum(float(p.get("market_value_usd", p.get("market_value", 0))) for p in positions)
-    nav = min(float(acct.get("portfolio_value", settings.crypto.max_capital)), settings.crypto.max_capital)
+    raw_nav = float(acct.get("portfolio_value", 0)) or float(acct.get("equity", 0))
+    cap = settings.crypto.max_capital
+    nav = min(raw_nav, cap) if cap > 0 else raw_nav
     exposure = (total_mv / nav * 100) if nav > 0 else 0
     unrealized = sum(float(p.get("unrealized_pnl", 0)) for p in positions)
 
@@ -775,6 +778,7 @@ async def run() -> None:
     exchange = CoinbaseCryptoService()
     _exchange_ref = exchange
 
+    acct: dict = {}
     if exchange.is_authenticated:
         try:
             acct = await asyncio.to_thread(exchange.get_account)
@@ -818,9 +822,12 @@ async def run() -> None:
     risk_agent = RiskValidatorAgent()
     executor = OrderExecutorAgent(exchange, telegram)
 
+    init_nav = float(acct.get("equity", acct.get("portfolio_value", 0))) if exchange.is_authenticated and acct else 0
+    cap_label = "Whole account" if settings.crypto.max_capital <= 0 else f"${settings.crypto.max_capital:,.0f}"
+
     _state["portfolio"] = {
-        "nav": settings.crypto.max_capital,
-        "cash": settings.crypto.max_capital,
+        "nav": init_nav,
+        "cash": float(acct.get("cash", init_nav)) if exchange.is_authenticated and acct else 0,
         "total_exposure_pct": 0,
         "unrealized_pnl": 0,
         "drawdown_pct": 0,
@@ -829,7 +836,7 @@ async def run() -> None:
     await telegram.send(
         "🚀 *Alpha-Paca Crypto Started (Coinbase)*\n"
         f"Pairs: {', '.join(settings.crypto.pair_list)}\n"
-        f"Capital: ${settings.crypto.max_capital:,.0f}\n"
+        f"Capital: {cap_label}\n"
         f"Mode: LIVE"
     )
 

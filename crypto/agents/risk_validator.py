@@ -25,6 +25,17 @@ class RiskValidatorAgent(BaseAgent):
         super().__init__()
         self._last_trade_times: dict[str, datetime] = {}
 
+    @staticmethod
+    def _get_nav(positions: list[dict], settings) -> float:
+        from agents.base import get_state_ref
+        state = get_state_ref()
+        if state:
+            nav = state.get("portfolio", {}).get("nav", 0)
+            if nav > 0:
+                return nav
+        cap = settings.crypto.max_capital
+        return cap if cap > 0 else 10000.0
+
     async def run(self, **kwargs) -> dict:
         """Validate a proposed trade decision against risk rules.
 
@@ -99,7 +110,7 @@ class RiskValidatorAgent(BaseAgent):
             p_pair = p.get("pair", p.get("symbol", ""))
             if p_pair == pair:
                 mv = float(p.get("market_value_usd", p.get("market_value", 0)))
-                nav = float(p.get("nav", settings.crypto.max_capital))
+                nav = float(self._get_nav(positions, settings))
                 existing_pct = (mv / nav * 100) if nav > 0 else 0
 
         if existing_pct + size_pct > max_pos:
@@ -151,7 +162,7 @@ class RiskValidatorAgent(BaseAgent):
             if p_pair in members and p_pair != pair:
                 mv = float(p.get("market_value_usd", p.get("market_value", 0)))
                 settings = get_settings()
-                nav = settings.crypto.max_capital
+                nav = float(self._get_nav(positions, settings))
                 group_exposure += (mv / nav * 100) if nav > 0 else 0
 
         max_group_pct = 60

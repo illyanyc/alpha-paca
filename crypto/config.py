@@ -47,7 +47,7 @@ class CryptoTradingSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CRYPTO_", env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
     )
-    max_capital: float = 1000.0
+    max_capital: float = 0.0
     pairs: str = "BTC/USD,ETH/USD,SOL/USD,DOGE/USD,LINK/USD"
     risk_per_trade_pct: float = 2.0
     max_position_pct: float = 30.0

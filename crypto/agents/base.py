@@ -33,6 +33,10 @@ def set_state_ref(state: dict) -> None:
     _state_ref = state
 
 
+def get_state_ref() -> dict | None:
+    return _state_ref
+
+
 BACKOFF_SCHEDULE = [2, 5, 15, 30, 60]
 
 

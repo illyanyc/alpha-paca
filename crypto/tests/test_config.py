@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 def test_settings_loads():
     from config import get_settings
     s = get_settings()
-    assert s.crypto.max_capital > 0
+    assert s.crypto.max_capital >= 0
     assert len(s.crypto.pair_list) >= 1
 
 
