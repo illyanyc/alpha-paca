@@ -166,7 +166,7 @@ async def run_paper_test():
                     confidence=best_conf,
                     reasoning=f"Paper test — tech={best_score:+.3f}",
                     status="open",
-                    alpaca_order_id="paper-test-001",
+                    exchange_order_id="paper-test-001",
                 )
                 session.add(trade)
                 await session.commit()
@@ -199,7 +199,7 @@ async def run_paper_test():
 
             async with async_session_factory() as session:
                 stmt = select(CryptoTrade).where(
-                    CryptoTrade.alpaca_order_id == "paper-test-001"
+                    CryptoTrade.exchange_order_id == "paper-test-001"
                 )
                 result = await session.execute(stmt)
                 trade = result.scalar_one_or_none()

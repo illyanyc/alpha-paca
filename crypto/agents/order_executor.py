@@ -221,7 +221,7 @@ class OrderExecutorAgent(BaseAgent):
                 confidence=kwargs.get("confidence"),
                 reasoning=kwargs.get("reasoning"),
                 status="open" if kwargs["side"] == "BUY" else "closed",
-                alpaca_order_id=kwargs.get("order_id"),
+                exchange_order_id=kwargs.get("order_id"),
             )
             session.add(trade)
             await session.commit()

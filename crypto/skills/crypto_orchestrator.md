@@ -32,8 +32,8 @@ Any of the following triggers a SELL:
 - Never exceed max_position_pct per pair
 - Scale confidence into size: higher confidence = larger position (within limits)
 
-## Alpaca Crypto Constraints
-- **LONG ONLY**: No short selling on Alpaca crypto
+## Coinbase Spot Constraints
+- **LONG ONLY**: No short selling on Coinbase spot
 - SELL = exit position completely (go to cash/USD)
 - BUY = enter or add to a long position
 - HOLD = maintain current position

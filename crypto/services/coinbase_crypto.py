@@ -1,4 +1,4 @@
-"""Coinbase Advanced Trade API wrapper — drop-in replacement for AlpacaCryptoService."""
+"""Coinbase Advanced Trade API wrapper for crypto trading."""
 
 from __future__ import annotations
 
@@ -39,10 +39,7 @@ def _normalize_pem_secret(secret: str) -> str:
 
 
 class CoinbaseCryptoService:
-    """Unified interface to Coinbase Advanced Trade data + trading endpoints.
-
-    Matches the AlpacaCryptoService API so the rest of the system works unchanged.
-    """
+    """Unified interface to Coinbase Advanced Trade data + trading endpoints."""
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -137,7 +134,7 @@ class CoinbaseCryptoService:
     # ── Trading ──────────────────────────────────────────────────────
 
     def get_account(self) -> dict[str, Any]:
-        """Return account summary matching AlpacaCryptoService format."""
+        """Return account summary: equity, cash, buying power, portfolio value."""
         raw = self._client.get_accounts(limit=250)
         accounts = raw.get("accounts", [])
 

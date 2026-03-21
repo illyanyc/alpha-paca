@@ -8,9 +8,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-os.environ.setdefault("ALPACA_API_KEY", "test")
-os.environ.setdefault("ALPACA_API_SECRET", "test")
-os.environ.setdefault("ALPACA_PAPER", "true")
 os.environ.setdefault("COINBASE_API_KEY", "test")
 os.environ.setdefault("COINBASE_API_SECRET", "test")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://localhost:5432/test")

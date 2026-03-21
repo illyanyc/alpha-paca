@@ -8,15 +8,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env.local")
 
 
-class AlpacaSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="ALPACA_", env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
-    )
-    api_key: str = ""
-    api_secret: str = ""
-    paper: bool = True
-
-
 class CoinbaseSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="COINBASE_", env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
@@ -78,7 +69,6 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
-    alpaca: AlpacaSettings = AlpacaSettings()
     coinbase: CoinbaseSettings = CoinbaseSettings()
     api_keys: APIKeySettings = APIKeySettings()
     database: DatabaseSettings = DatabaseSettings()

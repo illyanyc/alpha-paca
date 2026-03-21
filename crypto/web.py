@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 app = FastAPI(title="Alpha-Paca Crypto", docs_url=None, redoc_url=None)
 
-DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "alpaca")
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "paca")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 SESSION_COOKIE = "ap_session"
 SESSION_MAX_AGE = 86400 * 7  # 7 days
@@ -370,10 +370,10 @@ tr:last-child td{border-bottom:none}
 .logout:hover{color:var(--text)}
 .settings-link{position:fixed;top:8px;left:72px;font-size:10px;color:var(--dim);text-decoration:none;padding:3px 8px;border-radius:4px;background:var(--card);border:1px solid var(--border)}
 .settings-link:hover{color:var(--text)}
-.alpaca-banner{padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:12px;display:flex;align-items:center;gap:8px}
-.alpaca-ok{background:rgba(0,212,170,.1);border:1px solid rgba(0,212,170,.3);color:var(--green)}
-.alpaca-fail{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:var(--red)}
-.alpaca-checking{background:rgba(255,217,61,.1);border:1px solid rgba(255,217,61,.3);color:var(--yellow)}
+.exch-banner{padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:12px;display:flex;align-items:center;gap:8px}
+.exch-ok{background:rgba(0,212,170,.1);border:1px solid rgba(0,212,170,.3);color:var(--green)}
+.exch-fail{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:var(--red)}
+.exch-checking{background:rgba(255,217,61,.1);border:1px solid rgba(255,217,61,.3);color:var(--yellow)}
 </style></head><body>
 <div id="conn" class="conn conn-lost">CONNECTING</div>
 <a href="/logout" class="logout">Logout</a>
@@ -389,9 +389,9 @@ tr:last-child td{border-bottom:none}
 </div>
 </div>
 
-<div id="alpaca-banner" class="alpaca-banner alpaca-checking" style="display:none">
-<span id="alpaca-icon">⏳</span>
-<span id="alpaca-msg">Checking Alpaca connection...</span>
+<div id="exch-banner" class="exch-banner exch-checking" style="display:none">
+<span id="exch-icon">⏳</span>
+<span id="exch-msg">Checking Coinbase connection...</span>
 <a href="/settings" style="margin-left:auto;color:inherit;font-weight:700;text-decoration:underline">Fix →</a>
 </div>
 
@@ -506,23 +506,23 @@ function render(d) {
   if (!d || !d.portfolio) return;
 
   // Exchange status banner
-  const ab = $('alpaca-banner');
+  const ab = $('exch-banner');
   const exch = d.exchange || {};
   if (exch.status === 'connected') {
     ab.style.display = 'flex';
-    ab.className = 'alpaca-banner alpaca-ok';
-    $('alpaca-icon').textContent = '✅';
-    $('alpaca-msg').textContent = 'Coinbase connected — trading enabled';
+    ab.className = 'exch-banner exch-ok';
+    $('exch-icon').textContent = '✅';
+    $('exch-msg').textContent = 'Coinbase connected — trading enabled';
   } else if (exch.status === 'unauthorized') {
     ab.style.display = 'flex';
-    ab.className = 'alpaca-banner alpaca-fail';
-    $('alpaca-icon').textContent = '🔴';
-    $('alpaca-msg').textContent = 'Coinbase unauthorized — ' + (exch.error || 'check API keys');
+    ab.className = 'exch-banner exch-fail';
+    $('exch-icon').textContent = '🔴';
+    $('exch-msg').textContent = 'Coinbase unauthorized — ' + (exch.error || 'check API keys');
   } else if (exch.status === 'checking') {
     ab.style.display = 'flex';
-    ab.className = 'alpaca-banner alpaca-checking';
-    $('alpaca-icon').textContent = '⏳';
-    $('alpaca-msg').textContent = 'Checking Coinbase connection...';
+    ab.className = 'exch-banner exch-checking';
+    $('exch-icon').textContent = '⏳';
+    $('exch-msg').textContent = 'Checking Coinbase connection...';
   } else {
     ab.style.display = 'none';
   }

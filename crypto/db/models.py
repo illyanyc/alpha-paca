@@ -33,7 +33,7 @@ class CryptoTrade(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="open")  # open / closed / cancelled
-    alpaca_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

@@ -13,8 +13,6 @@ alembic>=1.13
 # Redis
 redis>=5.0
 
-# Alpaca (kept for legacy reference)
-alpaca-py>=0.28
 pytz>=2024.1
 
 # Coinbase

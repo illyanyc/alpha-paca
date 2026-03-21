@@ -11,7 +11,6 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 REDIS_KEY_PREFIX = "alphapaca:crypto:settings:"
-ALPACA_KEYS_KEY = f"{REDIS_KEY_PREFIX}alpaca_keys"
 COINBASE_KEYS_KEY = f"{REDIS_KEY_PREFIX}coinbase_keys"
 TRADING_SETTINGS_KEY = f"{REDIS_KEY_PREFIX}trading"
 AGENT_LOG_KEY = f"{REDIS_KEY_PREFIX}agent_log"
@@ -26,28 +25,6 @@ def init_store(redis_conn: aioredis.Redis) -> None:
 
 def get_redis() -> aioredis.Redis | None:
     return _redis
-
-
-async def save_alpaca_keys(api_key: str, api_secret: str, paper: bool) -> None:
-    if not _redis:
-        return
-    data = json.dumps({"api_key": api_key, "api_secret": api_secret, "paper": paper})
-    await _redis.set(ALPACA_KEYS_KEY, data)
-    logger.info("alpaca_keys_saved_to_redis")
-
-
-async def load_alpaca_keys() -> dict[str, Any] | None:
-    if not _redis:
-        return None
-    raw = await _redis.get(ALPACA_KEYS_KEY)
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-        logger.info("alpaca_keys_loaded_from_redis")
-        return data
-    except (json.JSONDecodeError, TypeError):
-        return None
 
 
 async def save_coinbase_keys(api_key: str, api_secret: str) -> None:
