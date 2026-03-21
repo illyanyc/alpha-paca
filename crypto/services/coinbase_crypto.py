@@ -248,10 +248,19 @@ class CoinbaseCryptoService:
                 "Create at https://portal.cdp.coinbase.com/projects/api-keys"
             )
 
+    @staticmethod
+    def _to_dict(resp: Any) -> dict:
+        """Normalize SDK typed response objects to plain dicts."""
+        if isinstance(resp, dict):
+            return resp
+        if hasattr(resp, "to_dict"):
+            return resp.to_dict()
+        return dict(resp)
+
     def get_account(self) -> dict[str, Any]:
         """Return account summary. Requires CDP auth."""
         self._require_auth()
-        raw = self._auth.get_accounts(limit=250)
+        raw = self._to_dict(self._auth.get_accounts(limit=250))
         accounts = raw.get("accounts", [])
 
         cash = 0.0
@@ -281,7 +290,7 @@ class CoinbaseCryptoService:
     def get_positions(self) -> list[dict[str, Any]]:
         """Return non-zero crypto holdings. Requires CDP auth."""
         self._require_auth()
-        raw = self._auth.get_accounts(limit=250)
+        raw = self._to_dict(self._auth.get_accounts(limit=250))
         accounts = raw.get("accounts", [])
         positions: list[dict[str, Any]] = []
 
@@ -324,17 +333,17 @@ class CoinbaseCryptoService:
         base_size = str(qty)
 
         if side.upper() == "BUY":
-            raw = self._auth.market_order_buy(
+            raw = self._to_dict(self._auth.market_order_buy(
                 client_order_id=client_order_id,
                 product_id=product_id,
                 base_size=base_size,
-            )
+            ))
         else:
-            raw = self._auth.market_order_sell(
+            raw = self._to_dict(self._auth.market_order_sell(
                 client_order_id=client_order_id,
                 product_id=product_id,
                 base_size=base_size,
-            )
+            ))
 
         success = raw.get("success", False)
         success_resp = raw.get("success_response", {}) or {}
@@ -366,7 +375,7 @@ class CoinbaseCryptoService:
 
     def get_order(self, order_id: str) -> dict[str, Any]:
         self._require_auth()
-        raw = self._auth.get_order(order_id)
+        raw = self._to_dict(self._auth.get_order(order_id))
         order = raw.get("order", raw)
 
         status_map = {
