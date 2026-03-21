@@ -516,6 +516,11 @@ function render(d) {
     ab.className = 'exch-banner exch-ok';
     $('exch-icon').textContent = '✅';
     $('exch-msg').textContent = 'Coinbase connected — trading enabled';
+  } else if (exch.status === 'market_only') {
+    ab.style.display = 'flex';
+    ab.className = 'exch-banner exch-fail';
+    $('exch-icon').textContent = '📊';
+    $('exch-msg').textContent = 'Market data active — trading disabled (need CDP PEM keys). Go to Settings → save CDP keys from portal.cdp.coinbase.com';
   } else if (exch.status === 'unauthorized') {
     ab.style.display = 'flex';
     ab.className = 'exch-banner exch-fail';
@@ -871,6 +876,8 @@ async function loadStatus() {
     const exch = d.exchange || {};
     if (exch.status === 'connected') {
       cs.className = 'current-status cs-ok'; cs.innerHTML = '✅ Coinbase connected — trading enabled';
+    } else if (exch.status === 'market_only') {
+      cs.className = 'current-status cs-fail'; cs.innerHTML = '📊 Market data active — need CDP PEM keys for trading. Create at <a href="https://portal.cdp.coinbase.com/projects/api-keys" target="_blank" style="color:#4fc3f7">portal.cdp.coinbase.com</a> (ECDSA/ES256)';
     } else if (exch.status === 'unauthorized') {
       cs.className = 'current-status cs-fail'; cs.innerHTML = '🔴 Unauthorized — ' + (exch.error || 'check API keys');
     } else {

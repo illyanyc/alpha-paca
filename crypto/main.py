@@ -104,11 +104,22 @@ async def reload_coinbase_keys(api_key: str, api_secret: str) -> dict[str, str]:
     """Hot-swap Coinbase credentials, persist to Redis, update in-memory client."""
     global _exchange_ref
     from services.settings_store import save_coinbase_keys
+    from services.coinbase_crypto import _is_pem_key
+
+    if not _is_pem_key(api_secret):
+        err = (
+            "Your API secret is not a PEM private key. "
+            "Create CDP keys at https://portal.cdp.coinbase.com/projects/api-keys "
+            "using ECDSA (ES256)."
+        )
+        _state["exchange_status"] = "unauthorized"
+        _state["exchange_error"] = err
+        return {"status": "unauthorized", "error": err}
 
     try:
         from coinbase.rest import RESTClient
-        test_client = RESTClient(api_key=api_key, api_secret=api_secret)
-        acct_raw = test_client.get_accounts(limit=1)
+        test_client = RESTClient(api_key=api_key, api_secret=api_secret.replace("\\n", "\n").strip())
+        test_client.get_accounts(limit=1)
         if _exchange_ref:
             _exchange_ref.replace_client(api_key, api_secret)
         _state["exchange_status"] = "connected"
@@ -738,23 +749,29 @@ async def run() -> None:
     exchange = CoinbaseCryptoService()
     _exchange_ref = exchange
 
-    try:
-        acct = await asyncio.to_thread(exchange.get_account)
-        logger.info(
-            "coinbase_connected",
-            equity=acct.get("equity"),
-            cash=acct.get("cash"),
-        )
-        _state["exchange_status"] = "connected"
-        _state["exchange_error"] = ""
-    except Exception as e:
-        err_msg = str(e).strip()
-        logger.error(
-            "coinbase_auth_failed",
+    if exchange.is_authenticated:
+        try:
+            acct = await asyncio.to_thread(exchange.get_account)
+            logger.info(
+                "coinbase_connected",
+                equity=acct.get("equity"),
+                cash=acct.get("cash"),
+            )
+            _state["exchange_status"] = "connected"
+            _state["exchange_error"] = ""
+        except Exception as e:
+            err_msg = str(e).strip()
+            logger.error("coinbase_auth_failed", error=err_msg)
+            _state["exchange_status"] = "unauthorized"
+            _state["exchange_error"] = err_msg
+    else:
+        err_msg = exchange.auth_error_message or "CDP PEM keys required for trading"
+        logger.warning(
+            "coinbase_no_trading_auth",
+            hint="Market data available. Trading disabled.",
             error=err_msg,
-            hint="Check COINBASE_API_KEY / COINBASE_API_SECRET env vars.",
         )
-        _state["exchange_status"] = "unauthorized"
+        _state["exchange_status"] = "market_only"
         _state["exchange_error"] = err_msg
 
     telegram = TelegramService()

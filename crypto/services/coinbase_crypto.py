@@ -1,4 +1,11 @@
-"""Coinbase Advanced Trade API wrapper for crypto trading."""
+"""Coinbase Advanced Trade API wrapper for crypto trading.
+
+Uses public endpoints (no auth) for market data (prices, candles).
+Uses CDP API keys (JWT/PEM) for account data and order execution.
+
+CDP keys must be created at https://portal.cdp.coinbase.com/projects/api-keys
+with ECDSA (ES256) signature algorithm.
+"""
 
 from __future__ import annotations
 
@@ -8,12 +15,14 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+import requests
 import structlog
-from coinbase.rest import RESTClient
 
 from config import get_settings
 
 logger = structlog.get_logger(__name__)
+
+API_BASE = "https://api.coinbase.com"
 
 
 def _to_product_id(pair: str) -> str:
@@ -26,39 +35,129 @@ def _to_pair(product_id: str) -> str:
     return product_id.replace("-", "/")
 
 
-def _normalize_pem_secret(secret: str) -> str:
-    """Ensure PEM secret has proper newline formatting.
+def _is_pem_key(secret: str) -> bool:
+    s = secret.replace("\\n", "\n").strip()
+    return s.startswith("-----BEGIN")
 
-    CDP secrets may arrive as a single line with literal \\n or as a
-    raw base64 blob. This normalises them into valid PEM blocks.
-    """
-    secret = secret.replace("\\n", "\n").strip()
-    if secret.startswith("-----"):
-        return secret
-    return secret
+
+def _normalize_pem_secret(secret: str) -> str:
+    return secret.replace("\\n", "\n").strip()
+
+
+class _PublicClient:
+    """Unauthenticated client for Coinbase public market data endpoints."""
+
+    def __init__(self) -> None:
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+
+    def get_product_book(self, product_id: str, limit: int = 1) -> dict:
+        """Public product book with best bid/ask."""
+        resp = self.session.get(
+            f"{API_BASE}/api/v3/brokerage/market/product_book",
+            params={"product_id": product_id, "limit": str(limit)},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_best_bid_ask(self, product_ids: list[str] | None = None) -> dict:
+        """Aggregate bid/ask from individual product_book calls."""
+        pricebooks = []
+        for pid in (product_ids or []):
+            try:
+                book = self.get_product_book(pid, limit=1)
+                pb = book.get("pricebook", {})
+                if pb:
+                    pricebooks.append(pb)
+            except Exception as e:
+                logger.warning("public_bid_ask_failed", product_id=pid, error=str(e))
+        return {"pricebooks": pricebooks}
+
+    def get_product(self, product_id: str) -> dict:
+        resp = self.session.get(
+            f"{API_BASE}/api/v3/brokerage/market/products/{product_id}",
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_candles(self, product_id: str, start: str, end: str, granularity: str) -> dict:
+        resp = self.session.get(
+            f"{API_BASE}/api/v3/brokerage/market/products/{product_id}/candles",
+            params={"start": start, "end": end, "granularity": granularity},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _make_auth_client(api_key: str, api_secret: str):
+    """Return an authenticated RESTClient for trading — requires CDP PEM keys."""
+    if not api_key or not api_secret:
+        return None
+    if not _is_pem_key(api_secret):
+        logger.warning(
+            "coinbase_key_type_mismatch",
+            hint=(
+                "Your COINBASE_API_SECRET is not a PEM private key. "
+                "CDP keys are required for trading. "
+                "Create new keys at https://portal.cdp.coinbase.com/projects/api-keys "
+                "using ECDSA (ES256) signature algorithm."
+            ),
+        )
+        return None
+    from coinbase.rest import RESTClient
+
+    return RESTClient(api_key=api_key, api_secret=_normalize_pem_secret(api_secret))
 
 
 class CoinbaseCryptoService:
-    """Unified interface to Coinbase Advanced Trade data + trading endpoints."""
+    """Unified interface to Coinbase Advanced Trade data + trading endpoints.
+
+    Market data always works (public endpoints, no auth).
+    Trading requires CDP API keys (JWT/PEM).
+    """
 
     def __init__(self) -> None:
         settings = get_settings()
-        api_key = settings.coinbase.api_key
-        api_secret = _normalize_pem_secret(settings.coinbase.api_secret)
+        self._public = _PublicClient()
+        self._auth = _make_auth_client(
+            settings.coinbase.api_key, settings.coinbase.api_secret,
+        )
+        if self._auth:
+            logger.info("coinbase_authenticated", key_prefix=settings.coinbase.api_key[:12])
+        else:
+            logger.warning(
+                "coinbase_no_auth",
+                hint="Market data available. Trading disabled until CDP PEM keys are configured.",
+            )
 
-        self._client = RESTClient(api_key=api_key, api_secret=api_secret)
+    @property
+    def is_authenticated(self) -> bool:
+        return self._auth is not None
+
+    @property
+    def auth_error_message(self) -> str | None:
+        if self._auth:
+            return None
+        return (
+            "Coinbase trading requires CDP API keys (PEM format). "
+            "Create at https://portal.cdp.coinbase.com/projects/api-keys — "
+            "select ECDSA (ES256). Your current key is a legacy Cloud API key "
+            "which is no longer supported for Advanced Trade."
+        )
 
     def replace_client(self, api_key: str, api_secret: str) -> None:
-        """Hot-swap the underlying REST client with new credentials."""
-        api_secret = _normalize_pem_secret(api_secret)
-        self._client = RESTClient(api_key=api_key, api_secret=api_secret)
+        """Hot-swap credentials. Validates key type before accepting."""
+        self._auth = _make_auth_client(api_key, api_secret)
 
-    # ── Market data ──────────────────────────────────────────────────
+    # ── Market data (public — always works) ─────────────────────────
 
     def get_latest_quotes(self, pairs: list[str]) -> dict[str, dict[str, Any]]:
-        """Fetch latest bid/ask quotes for given pairs (e.g. ['BTC/USD'])."""
+        """Fetch latest bid/ask quotes. Uses public endpoints."""
         product_ids = [_to_product_id(p) for p in pairs]
-        raw = self._client.get_best_bid_ask(product_ids=product_ids)
+        raw = self._public.get_best_bid_ask(product_ids=product_ids)
 
         result: dict[str, dict[str, Any]] = {}
         for pricebook in raw.get("pricebooks", []):
@@ -90,7 +189,7 @@ class CoinbaseCryptoService:
         timeframe: Any = None,
         lookback_minutes: int = 120,
     ) -> list[dict[str, Any]]:
-        """Fetch OHLCV candles for a single crypto pair."""
+        """Fetch OHLCV candles. Uses public endpoints."""
         product_id = _to_product_id(pair)
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=lookback_minutes)
@@ -107,7 +206,7 @@ class CoinbaseCryptoService:
         start_str = str(int(start.timestamp()))
         end_str = str(int(end.timestamp()))
 
-        raw = self._client.get_candles(
+        raw = self._public.get_candles(
             product_id=product_id,
             start=start_str,
             end=end_str,
@@ -131,11 +230,28 @@ class CoinbaseCryptoService:
         bars.sort(key=lambda b: b["timestamp"] or datetime.min.replace(tzinfo=timezone.utc))
         return bars
 
-    # ── Trading ──────────────────────────────────────────────────────
+    def get_product_price(self, pair: str) -> float:
+        """Get current price for a single product. Public endpoint."""
+        product_id = _to_product_id(pair)
+        try:
+            product = self._public.get_product(product_id)
+            return float(product.get("price", 0))
+        except Exception:
+            return 0.0
+
+    # ── Account data (authenticated) ────────────────────────────────
+
+    def _require_auth(self) -> None:
+        if not self._auth:
+            raise RuntimeError(
+                "Coinbase trading not available — CDP API keys required. "
+                "Create at https://portal.cdp.coinbase.com/projects/api-keys"
+            )
 
     def get_account(self) -> dict[str, Any]:
-        """Return account summary: equity, cash, buying power, portfolio value."""
-        raw = self._client.get_accounts(limit=250)
+        """Return account summary. Requires CDP auth."""
+        self._require_auth()
+        raw = self._auth.get_accounts(limit=250)
         accounts = raw.get("accounts", [])
 
         cash = 0.0
@@ -151,13 +267,9 @@ class CoinbaseCryptoService:
                 cash += total
                 total_value += total
             elif total > 0:
-                try:
-                    pid = f"{currency}-USD"
-                    product = self._client.get_product(pid)
-                    price = float(product.get("price", 0))
+                price = self.get_product_price(f"{currency}/USD")
+                if price > 0:
                     total_value += total * price
-                except Exception:
-                    pass
 
         return {
             "equity": total_value,
@@ -167,8 +279,9 @@ class CoinbaseCryptoService:
         }
 
     def get_positions(self) -> list[dict[str, Any]]:
-        """Return non-zero crypto holdings as positions."""
-        raw = self._client.get_accounts(limit=250)
+        """Return non-zero crypto holdings. Requires CDP auth."""
+        self._require_auth()
+        raw = self._auth.get_accounts(limit=250)
         accounts = raw.get("accounts", [])
         positions: list[dict[str, Any]] = []
 
@@ -184,13 +297,7 @@ class CoinbaseCryptoService:
                 continue
 
             pair = f"{currency}/USD"
-            try:
-                pid = f"{currency}-USD"
-                product = self._client.get_product(pid)
-                current_price = float(product.get("price", 0))
-            except Exception:
-                current_price = 0
-
+            current_price = self.get_product_price(pair)
             market_value = qty * current_price
 
             positions.append({
@@ -205,22 +312,25 @@ class CoinbaseCryptoService:
 
         return positions
 
+    # ── Trading (authenticated) ─────────────────────────────────────
+
     def submit_market_order(
         self, pair: str, qty: Decimal, side: str
     ) -> dict[str, Any]:
-        """Submit a market order and return order details."""
+        """Submit a market order. Requires CDP auth."""
+        self._require_auth()
         product_id = _to_product_id(pair)
         client_order_id = str(uuid.uuid4())
         base_size = str(qty)
 
         if side.upper() == "BUY":
-            raw = self._client.market_order_buy(
+            raw = self._auth.market_order_buy(
                 client_order_id=client_order_id,
                 product_id=product_id,
                 base_size=base_size,
             )
         else:
-            raw = self._client.market_order_sell(
+            raw = self._auth.market_order_sell(
                 client_order_id=client_order_id,
                 product_id=product_id,
                 base_size=base_size,
@@ -255,7 +365,8 @@ class CoinbaseCryptoService:
         }
 
     def get_order(self, order_id: str) -> dict[str, Any]:
-        raw = self._client.get_order(order_id)
+        self._require_auth()
+        raw = self._auth.get_order(order_id)
         order = raw.get("order", raw)
 
         status_map = {
