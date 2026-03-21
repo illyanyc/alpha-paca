@@ -240,136 +240,28 @@ class OrderExecutorAgent(BaseAgent):
         confidence: float,
         reasoning: str,
     ) -> dict:
-        """Open a short position — sell futures to profit from price decline."""
-        notional = available_capital * (size_pct / 100)
-        qty = Decimal(str(notional / price)) if price > 0 else Decimal(0)
+        """Bearish signal on spot — sell existing long position to go to cash.
 
-        if qty <= 0:
-            return {"status": "skip", "reason": "zero qty"}
+        Coinbase spot doesn't support naked short selling.  When the
+        orchestrator signals SHORT we close any long position for the
+        pair instead.  If no position is held we simply stay in cash.
+        """
+        actual_balance = await asyncio.to_thread(self._exchange.get_available_balance, pair)
+        if actual_balance <= 0:
+            self.think(f"⏭️ {pair} SHORT→cash — no position to sell, already in cash")
+            return {"status": "skip", "reason": "no position — already in cash"}
 
-        try:
-            logger.info("submitting_short", pair=pair, qty=str(qty), notional=notional)
-            order_result = await asyncio.to_thread(
-                self._exchange.submit_market_order, pair, qty, "SELL"
-            )
-            self.think(f"📤 SHORT order submitted {pair} — id={order_result['order_id'][:8]}... waiting for fill")
-            fill = await self._exchange.wait_for_fill(order_result["order_id"])
-
-            filled_price = fill.get("filled_avg_price", price)
-            filled_qty = fill.get("filled_qty", float(qty))
-            fill_status = fill.get("status", "unknown")
-            slippage_bps = ((price - filled_price) / price * 10000) if price > 0 else 0
-
-            self.think(f"✅ SHORT FILLED {pair}: {filled_qty} @ ${filled_price:,.2f} (status={fill_status})")
-
-            await self._record_trade(
-                pair=pair, side="SHORT",
-                qty=Decimal(str(filled_qty)),
-                price=Decimal(str(filled_price)),
-                confidence=confidence, reasoning=reasoning,
-                slippage_bps=slippage_bps,
-                order_id=order_result["order_id"],
-            )
-
-            await self._update_position(
-                pair, Decimal(str(filled_qty)), Decimal(str(filled_price)),
-                is_buy=False, side="short",
-            )
-
-            await self._telegram.trade_alert(
-                pair=pair, side="SHORT", qty=filled_qty,
-                price=filled_price, confidence=confidence, reasoning=reasoning,
-            )
-
-            logger.info("short_executed", pair=pair, qty=filled_qty, price=filled_price)
-            return {
-                "status": "filled", "pair": pair, "side": "SHORT",
-                "qty": filled_qty, "price": filled_price,
-                "slippage_bps": slippage_bps,
-                "order_id": order_result["order_id"],
-            }
-
-        except Exception as e:
-            logger.exception("short_failed", pair=pair, error=str(e))
-            self.think(f"❌ SHORT FAILED {pair}: {e}")
-            await self._telegram.error_alert("Short Failed", f"{pair}: {e}")
-            return {"status": "error", "pair": pair, "error": str(e)}
+        self.think(f"⚡ SHORT signal → closing long {pair} (spot, qty={actual_balance})")
+        return await self._execute_sell(pair, confidence, f"[SHORT→SELL spot] {reasoning}")
 
     async def _execute_cover(self, pair: str, confidence: float, reasoning: str) -> dict:
-        """Close a short position — buy back to cover."""
-        try:
-            qty: Decimal = Decimal(0)
-            entry_price: Decimal = Decimal(0)
-            current_price_ref: float = 0.0
+        """COVER on spot = BUY (re-enter long after a bearish period).
 
-            async with async_session_factory() as session:
-                stmt = select(CryptoPosition).where(
-                    CryptoPosition.pair == pair, CryptoPosition.side == "short"
-                )
-                result = await session.execute(stmt)
-                position = result.scalar_one_or_none()
-
-            if position and position.qty > 0:
-                qty = position.qty
-                entry_price = position.avg_entry_price
-                current_price_ref = float(position.current_price)
-            else:
-                self.think(f"⏭️ {pair} COVER skipped — no short position found")
-                return {"status": "skip", "reason": "no short position to cover"}
-
-            logger.info("submitting_cover", pair=pair, qty=str(qty))
-            order_result = await asyncio.to_thread(
-                self._exchange.submit_market_order, pair, qty, "BUY"
-            )
-            self.think(f"📤 COVER order submitted {pair} — id={order_result['order_id'][:8]}... waiting for fill")
-            fill = await self._exchange.wait_for_fill(order_result["order_id"])
-
-            filled_price = fill.get("filled_avg_price", 0)
-            filled_qty = fill.get("filled_qty", float(qty))
-            fill_status = fill.get("status", "unknown")
-            self.think(f"✅ COVER FILLED {pair}: {filled_qty} @ ${filled_price:,.2f} (status={fill_status})")
-
-            pnl = (entry_price - Decimal(str(filled_price))) * Decimal(str(filled_qty))
-            cost_basis = entry_price * qty
-            pnl_pct = float(pnl / cost_basis * 100) if cost_basis > 0 else 0
-            slippage_bps = ((filled_price - current_price_ref) / current_price_ref * 10000) if current_price_ref > 0 else 0
-
-            await self._record_trade(
-                pair=pair, side="COVER",
-                qty=Decimal(str(filled_qty)),
-                price=Decimal(str(filled_price)),
-                confidence=confidence, reasoning=reasoning,
-                slippage_bps=slippage_bps,
-                order_id=order_result["order_id"],
-                pnl=pnl, pnl_pct=pnl_pct,
-            )
-
-            await self._update_position(
-                pair, Decimal(str(filled_qty)), Decimal(str(filled_price)),
-                is_buy=True, side="short",
-            )
-
-            await record_realized_pnl(pair=pair, pnl=float(pnl), pnl_pct=pnl_pct, side="COVER")
-
-            await self._telegram.trade_alert(
-                pair=pair, side="COVER", qty=filled_qty,
-                price=filled_price, confidence=confidence,
-                reasoning=f"Short P&L: ${float(pnl):+,.2f} ({pnl_pct:+.1f}%) | {reasoning}",
-            )
-
-            logger.info("cover_executed", pair=pair, qty=filled_qty, price=filled_price, pnl=float(pnl))
-            return {
-                "status": "filled", "pair": pair, "side": "COVER",
-                "qty": filled_qty, "price": filled_price,
-                "pnl": float(pnl), "pnl_pct": pnl_pct,
-                "order_id": order_result["order_id"],
-            }
-
-        except Exception as e:
-            logger.exception("cover_failed", pair=pair, error=str(e))
-            self.think(f"❌ COVER FAILED {pair}: {e}")
-            await self._telegram.error_alert("Cover Failed", f"{pair}: {e}")
-            return {"status": "error", "pair": pair, "error": str(e)}
+        Since Coinbase spot has no real short positions, COVER simply
+        becomes a new BUY using the orchestrator's suggested size.
+        """
+        self.think(f"⏭️ {pair} COVER on spot — no short position to cover (spot is long-only)")
+        return {"status": "skip", "reason": "spot long-only — no short position to cover"}
 
     async def _record_trade(self, **kwargs) -> None:
         side = kwargs["side"]
