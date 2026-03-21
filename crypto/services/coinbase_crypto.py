@@ -323,6 +323,16 @@ class CoinbaseCryptoService:
 
     # ── Trading (authenticated) ─────────────────────────────────────
 
+    def _quantize_qty(self, pair: str, qty: Decimal) -> Decimal:
+        """Truncate qty to the product's allowed base_increment precision."""
+        product_id = _to_product_id(pair)
+        try:
+            product = self._public.get_product(product_id)
+            increment = Decimal(product.get("base_increment", "0.00000001"))
+            return (qty // increment) * increment
+        except Exception:
+            return qty.quantize(Decimal("0.00000001"))
+
     def submit_market_order(
         self, pair: str, qty: Decimal, side: str
     ) -> dict[str, Any]:
@@ -330,6 +340,9 @@ class CoinbaseCryptoService:
         self._require_auth()
         product_id = _to_product_id(pair)
         client_order_id = str(uuid.uuid4())
+        qty = self._quantize_qty(pair, qty)
+        if qty <= 0:
+            raise RuntimeError(f"Order qty too small after rounding for {pair}")
         base_size = str(qty)
 
         if side.upper() == "BUY":
