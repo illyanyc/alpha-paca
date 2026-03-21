@@ -126,18 +126,24 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
     drawdown = portfolio.get("drawdown_pct", 0)
     realized = portfolio.get("realized_pnl_today", 0)
 
+    total_pnl = portfolio.get("total_realized_pnl", 0)
+    total_trades = portfolio.get("total_trades", 0)
+    total_wr = portfolio.get("total_win_rate", 0)
+    daily_trades = portfolio.get("daily_trades", 0)
+    daily_wr = portfolio.get("daily_win_rate", 0)
+
     grid = Table.grid(padding=(0, 2), expand=True)
-    grid.add_column(justify="center")
-    grid.add_column(justify="center")
-    grid.add_column(justify="center")
-    grid.add_column(justify="center")
-    grid.add_column(justify="center")
+    for _ in range(8):
+        grid.add_column(justify="center")
 
     grid.add_row(
         f"[bold]NAV[/]\n[white]${nav:,.2f}[/]",
         f"[bold]Cash[/]\n[white]${cash:,.2f}[/]",
         f"[bold]Exposure[/]\n[{'green' if exposure < 70 else 'yellow' if exposure < 90 else 'red'}]{exposure:.1f}%[/]",
         f"[bold]Unrealized[/]\n[{_pnl_color(unrealized)}]${unrealized:+,.2f}[/]",
+        f"[bold]Day P&L[/]\n[{_pnl_color(realized)}]${realized:+,.2f}[/]",
+        f"[bold]Total P&L[/]\n[{_pnl_color(total_pnl)}]${total_pnl:+,.2f}[/]",
+        f"[bold]Win Rate[/]\n[{'green' if total_wr >= 50 else 'red'}]{total_wr:.0f}% ({total_trades})[/]",
         f"[bold]Drawdown[/]\n[{'green' if drawdown < 5 else 'yellow' if drawdown < 10 else 'red'}]{drawdown:.1f}%[/]",
     )
 

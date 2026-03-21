@@ -169,6 +169,12 @@ def _snapshot() -> dict[str, Any]:
             "exposure_pct": round(portfolio.get("total_exposure_pct", 0), 1),
             "unrealized_pnl": round(portfolio.get("unrealized_pnl", 0), 2),
             "drawdown_pct": round(portfolio.get("drawdown_pct", 0), 1),
+            "daily_pnl": round(portfolio.get("realized_pnl_today", 0), 2),
+            "total_pnl": round(portfolio.get("total_realized_pnl", 0), 2),
+            "total_trades": portfolio.get("total_trades", 0),
+            "total_win_rate": round(portfolio.get("total_win_rate", 0), 1),
+            "daily_trades": portfolio.get("daily_trades", 0),
+            "daily_win_rate": round(portfolio.get("daily_win_rate", 0), 1),
         },
         "prices": prices,
         "positions": positions,
@@ -181,6 +187,7 @@ def _snapshot() -> dict[str, Any]:
         "agent_log": s.get("agent_log", [])[-30:],
         "strategy_signals": _format_strategy_signals(s.get("strategy_signals", {})),
         "backtest": s.get("backtest_results", {}),
+        "pnl_per_pair": s.get("pnl_summary", {}).get("per_pair", {}),
     }
 
 
@@ -405,8 +412,11 @@ tr:last-child td{border-bottom:none}
 <div class="stat"><div class="label">Cash</div><div class="value" id="cash">$0</div></div>
 <div class="stat"><div class="label">Exposure</div><div class="value green" id="exposure">0%</div></div>
 <div class="stat"><div class="label">Unrealized</div><div class="value" id="unrealized">$0</div></div>
+<div class="stat"><div class="label">Day P&L</div><div class="value" id="daily-pnl">$0</div></div>
+<div class="stat"><div class="label">Total P&L</div><div class="value" id="total-pnl">$0</div></div>
+<div class="stat"><div class="label">Win Rate</div><div class="value" id="win-rate">0%</div></div>
+<div class="stat"><div class="label">Trades</div><div class="value" id="trade-count">0</div></div>
 <div class="stat"><div class="label">Drawdown</div><div class="value green" id="drawdown">0%</div></div>
-<div class="stat"><div class="label">Positions</div><div class="value" id="pos-count">0</div></div>
 </div>
 </div>
 
@@ -552,10 +562,25 @@ function render(d) {
   const unrEl = $('unrealized');
   unrEl.textContent = '$' + (p.unrealized_pnl >= 0 ? '+' : '') + p.unrealized_pnl.toFixed(2);
   unrEl.className = 'value ' + pnlClass(p.unrealized_pnl);
+
+  const dpEl = $('daily-pnl');
+  dpEl.textContent = '$' + (p.daily_pnl >= 0 ? '+' : '') + (p.daily_pnl||0).toFixed(2);
+  dpEl.className = 'value ' + pnlClass(p.daily_pnl);
+
+  const tpEl = $('total-pnl');
+  tpEl.textContent = '$' + (p.total_pnl >= 0 ? '+' : '') + (p.total_pnl||0).toFixed(2);
+  tpEl.className = 'value ' + pnlClass(p.total_pnl);
+
+  const wrEl = $('win-rate');
+  const wr = p.total_win_rate || 0;
+  wrEl.textContent = wr.toFixed(0) + '%';
+  wrEl.className = 'value ' + (wr >= 50 ? 'green' : wr > 0 ? 'red' : '');
+
+  $('trade-count').textContent = (p.total_trades||0) + ' (' + (p.daily_trades||0) + ' today)';
+
   const ddEl = $('drawdown');
   ddEl.textContent = p.drawdown_pct.toFixed(1) + '%';
   ddEl.className = 'value ' + (p.drawdown_pct < 5 ? 'green' : p.drawdown_pct < 10 ? 'yellow' : 'red');
-  $('pos-count').textContent = (d.positions||[]).length;
 
   // Prices
   let priceHTML = '';

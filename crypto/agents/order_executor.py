@@ -13,6 +13,7 @@ from agents.base import BaseAgent
 from db.engine import async_session_factory
 from db.models import CryptoPosition, CryptoTrade
 from services.coinbase_crypto import CoinbaseCryptoService
+from services.settings_store import record_realized_pnl
 from services.telegram import TelegramService
 
 logger = structlog.get_logger(__name__)
@@ -208,6 +209,8 @@ class OrderExecutorAgent(BaseAgent):
 
             await self._update_position(pair, Decimal(str(filled_qty)), Decimal(str(filled_price)), is_buy=False)
 
+            await record_realized_pnl(pair=pair, pnl=float(pnl), pnl_pct=pnl_pct, side="SELL")
+
             await self._telegram.trade_alert(
                 pair=pair, side="SELL", qty=filled_qty,
                 price=filled_price, confidence=confidence,
@@ -345,6 +348,8 @@ class OrderExecutorAgent(BaseAgent):
                 pair, Decimal(str(filled_qty)), Decimal(str(filled_price)),
                 is_buy=True, side="short",
             )
+
+            await record_realized_pnl(pair=pair, pnl=float(pnl), pnl_pct=pnl_pct, side="COVER")
 
             await self._telegram.trade_alert(
                 pair=pair, side="COVER", qty=filled_qty,

@@ -89,6 +89,15 @@ _state: dict[str, Any] = {
     "exchange_status": "checking",
     "exchange_error": "",
     "trading_mode": "",
+    "pnl_summary": {
+        "total_realized_pnl": 0.0,
+        "total_trades": 0,
+        "total_win_rate": 0.0,
+        "daily_realized_pnl": 0.0,
+        "daily_trades": 0,
+        "daily_win_rate": 0.0,
+        "per_pair": {},
+    },
 }
 
 
@@ -349,6 +358,7 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
         _high_water_mark = nav
     drawdown_pct = ((_high_water_mark - nav) / _high_water_mark * 100) if _high_water_mark > 0 else 0
 
+    pnl_s = _state.get("pnl_summary", {})
     return {
         "nav": nav,
         "cash": float(acct.get("cash", 0)),
@@ -356,6 +366,12 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
         "unrealized_pnl": unrealized,
         "drawdown_pct": drawdown_pct,
         "positions_count": len(positions),
+        "realized_pnl_today": pnl_s.get("daily_realized_pnl", 0),
+        "total_realized_pnl": pnl_s.get("total_realized_pnl", 0),
+        "total_trades": pnl_s.get("total_trades", 0),
+        "total_win_rate": pnl_s.get("total_win_rate", 0),
+        "daily_trades": pnl_s.get("daily_trades", 0),
+        "daily_win_rate": pnl_s.get("daily_win_rate", 0),
     }
 
 
@@ -590,8 +606,9 @@ async def tick_5m(
                             confidence=decision.get("confidence", 0),
                         )
 
-            from services.settings_store import save_agent_log as _sal
+            from services.settings_store import save_agent_log as _sal, load_pnl_summary
             await _sal(_state.get("agent_log", []))
+            _state["pnl_summary"] = await load_pnl_summary()
 
             if _learner:
                 r = await news_agent._get_redis()
@@ -726,9 +743,13 @@ async def run() -> None:
 
     from services.settings_store import (
         init_store, load_coinbase_keys, load_trading_settings,
-        load_agent_log, save_agent_log,
+        load_agent_log, save_agent_log, load_pnl_summary,
     )
     init_store(redis_conn)
+
+    pnl = await load_pnl_summary()
+    _state["pnl_summary"] = pnl
+    logger.info("pnl_loaded_from_redis", total=pnl["total_realized_pnl"], daily=pnl["daily_realized_pnl"])
 
     redis_keys = await load_coinbase_keys()
     if redis_keys:
