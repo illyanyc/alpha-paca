@@ -164,6 +164,20 @@ class OrderExecutorAgent(BaseAgent):
                 self.think(f"⏭️ {pair} SELL skipped — no position found on DB or exchange")
                 return {"status": "skip", "reason": "no position to sell"}
 
+            actual_balance = await asyncio.to_thread(self._exchange.get_available_balance, pair)
+            if actual_balance <= 0:
+                self.think(f"⏭️ {pair} SELL skipped — zero balance on Coinbase")
+                return {"status": "skip", "reason": "zero exchange balance"}
+            if actual_balance < qty:
+                logger.warning("sell_qty_capped", pair=pair, db_qty=str(qty), exchange_qty=str(actual_balance))
+                self.think(f"⚠️ {pair} sell qty capped: DB={qty} → exchange={actual_balance}")
+                qty = actual_balance
+
+            qty = self._exchange._quantize_qty(pair, qty)
+            if qty <= 0:
+                self.think(f"⏭️ {pair} SELL skipped — qty too small after rounding")
+                return {"status": "skip", "reason": "qty too small"}
+
             logger.info("submitting_sell", pair=pair, qty=str(qty))
             order_result = await asyncio.to_thread(self._exchange.submit_market_order, pair, qty, "SELL")
             self.think(f"📤 Order submitted {pair} SELL — id={order_result['order_id'][:8]}... waiting for fill")

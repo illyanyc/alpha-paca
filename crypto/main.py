@@ -192,6 +192,11 @@ async def create_tables() -> None:
                 "ALTER TABLE crypto_positions ADD COLUMN IF NOT EXISTS side VARCHAR(10) NOT NULL DEFAULT 'long'"
             )
         )
+        await conn.execute(
+            sqlalchemy.text(
+                "ALTER TABLE crypto_trades ADD COLUMN IF NOT EXISTS exchange_order_id VARCHAR(64)"
+            )
+        )
 
 
 async def enrich_positions(exchange_positions: list[dict]) -> list[dict]:

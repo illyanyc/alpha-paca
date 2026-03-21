@@ -321,6 +321,16 @@ class CoinbaseCryptoService:
 
         return positions
 
+    def get_available_balance(self, pair: str) -> Decimal:
+        """Return the actual available balance for a currency on Coinbase."""
+        self._require_auth()
+        currency = pair.split("/")[0]
+        raw = self._to_dict(self._auth.get_accounts(limit=250))
+        for acct in raw.get("accounts", []):
+            if acct.get("currency", "") == currency:
+                return Decimal(str(acct.get("available_balance", {}).get("value", "0")))
+        return Decimal(0)
+
     # ── Trading (authenticated) ─────────────────────────────────────
 
     def _quantize_qty(self, pair: str, qty: Decimal) -> Decimal:
