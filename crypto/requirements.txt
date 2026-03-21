@@ -36,7 +36,7 @@ rich>=13.0
 
 # Web Dashboard
 fastapi>=0.115
-uvicorn[standard]>=0.32
+uvicorn[standard]>=0.35
 python-multipart>=0.0.9
 
 # Testing
