@@ -1,4 +1,4 @@
-"""OrderExecutorAgent — submits orders to Alpaca, monitors fills, records to DB."""
+"""OrderExecutorAgent — submits orders to Coinbase, monitors fills, records to DB."""
 
 from __future__ import annotations
 
@@ -124,18 +124,38 @@ class OrderExecutorAgent(BaseAgent):
             return {"status": "error", "pair": pair, "error": str(e)}
 
     async def _execute_sell(self, pair: str, confidence: float, reasoning: str) -> dict:
-        """Sell entire position (go to cash)."""
+        """Sell entire position (exit long, go to cash).
+
+        Resolves the sellable quantity from (1) DB position, then (2) exchange
+        holdings as fallback, so sells work even if the DB drifted.
+        """
         try:
+            qty: Decimal = Decimal(0)
+            entry_price: Decimal = Decimal(0)
+            current_price_ref: float = 0.0
+
             async with async_session_factory() as session:
                 stmt = select(CryptoPosition).where(CryptoPosition.pair == pair)
                 result = await session.execute(stmt)
                 position = result.scalar_one_or_none()
 
-            if not position or position.qty <= 0:
-                return {"status": "skip", "reason": "no position to sell"}
+            if position and position.qty > 0:
+                qty = position.qty
+                entry_price = position.avg_entry_price
+                current_price_ref = float(position.current_price)
+            else:
+                exchange_positions = await asyncio.to_thread(self._exchange.get_positions)
+                for ep in exchange_positions:
+                    ep_pair = ep.get("pair", ep.get("symbol", ""))
+                    if ep_pair == pair and float(ep.get("qty", 0)) > 0:
+                        qty = Decimal(str(ep["qty"]))
+                        entry_price = Decimal(str(ep.get("avg_entry_price", ep.get("current_price", 0))))
+                        current_price_ref = float(ep.get("current_price", 0))
+                        break
 
-            qty = position.qty
-            entry_price = position.avg_entry_price
+            if qty <= 0:
+                self.think(f"⏭️ {pair} SELL skipped — no position found on DB or exchange")
+                return {"status": "skip", "reason": "no position to sell"}
 
             logger.info("submitting_sell", pair=pair, qty=str(qty))
             order_result = await asyncio.to_thread(self._exchange.submit_market_order, pair, qty, "SELL")
@@ -147,9 +167,10 @@ class OrderExecutorAgent(BaseAgent):
             fill_status = fill.get("status", "unknown")
             self.think(f"✅ FILLED {pair} SELL: {filled_qty} @ ${filled_price:,.2f} (status={fill_status})")
 
-            pnl = Decimal(str(filled_price)) * Decimal(str(filled_qty)) - entry_price * qty
-            pnl_pct = float(pnl / (entry_price * qty) * 100) if entry_price * qty > 0 else 0
-            slippage_bps = ((filled_price - float(position.current_price)) / float(position.current_price) * 10000) if position.current_price > 0 else 0
+            cost_basis = entry_price * qty
+            pnl = Decimal(str(filled_price)) * Decimal(str(filled_qty)) - cost_basis
+            pnl_pct = float(pnl / cost_basis * 100) if cost_basis > 0 else 0
+            slippage_bps = ((filled_price - current_price_ref) / current_price_ref * 10000) if current_price_ref > 0 else 0
 
             await self._record_trade(
                 pair=pair,

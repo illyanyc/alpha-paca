@@ -64,6 +64,8 @@ class CryptoTradingSettings(BaseSettings):
     max_total_exposure_pct: float = 90.0
     min_trade_interval_sec: int = 300
     confidence_threshold: float = 0.7
+    stop_loss_pct: float = 5.0
+    take_profit_pct: float = 12.0
 
     @property
     def pair_list(self) -> list[str]:

@@ -54,25 +54,37 @@ class OrchestratorAgent(BaseAgent):
         self._agent = Agent(
             "anthropic:claude-sonnet-4-20250514",
             instructions=(
-                "You are an AGGRESSIVE crypto portfolio manager at a top-tier quant fund. "
-                "Your mandate is to DEPLOY CAPITAL, not sit in cash. Cash is a losing "
-                "position due to opportunity cost.\n\n"
-                "You receive technical, fundamental, and news signals. Your job is to "
-                "make BUY/SELL/HOLD decisions with position sizing.\n\n"
-                "CRITICAL RULES:\n"
-                f"- The minimum confidence threshold for action is {self._confidence_threshold}. "
-                "ANY signal alignment above this MUST result in a BUY or SELL action.\n"
-                "- If 2 out of 3 signal sources (tech, fundamental, news) agree on direction, "
-                "that IS enough confidence to act. Set confidence >= 0.6.\n"
-                "- If all 3 sources agree, confidence MUST be >= 0.8.\n"
-                "- When in doubt, take SMALL positions (5-10% of capital) rather than sitting out.\n"
-                "- Bullish news + any positive technical signal = BUY with at least 0.6 confidence.\n"
-                "- You are LONG-ONLY: SELL means exit an existing position to cash.\n"
-                "- Idle cash earns nothing. If macro is neutral-to-bullish, deploy at least "
-                "30-50% of capital across the strongest pairs.\n"
-                "- Size positions proportionally to conviction: high conf = 15-25%, medium = 5-15%.\n"
-                "- DO NOT default everything to HOLD. That is failure.\n"
-                "- Provide clear reasoning for every decision.\n\n"
+                "You are an AGGRESSIVE crypto portfolio manager. Deploy capital or protect it.\n\n"
+                "You receive technical, fundamental, news, and strategy signals for each pair. "
+                "Decide BUY / SELL / HOLD with position sizing.\n\n"
+                "## POSITION SEMANTICS (Coinbase spot — long-only)\n"
+                "- BUY = enter or add to a LONG position (you own the crypto)\n"
+                "- SELL = EXIT an existing long position back to USD (not shorting)\n"
+                "- HOLD = no change to current position\n\n"
+                "## WHEN TO BUY\n"
+                f"- Confidence threshold: {self._confidence_threshold}\n"
+                "- If 2+ signal sources (tech, fundamental, news, strategies) are bullish → BUY.\n"
+                "- If all sources agree bullish → confidence >= 0.8, size 15-25%.\n"
+                "- If 2 sources agree → confidence >= 0.6, size 5-15%.\n"
+                "- When macro is neutral-to-bullish, deploy at least 30-50% of capital.\n"
+                "- Idle cash earns nothing. Prefer small positions over none.\n\n"
+                "## WHEN TO SELL (EXIT)\n"
+                "- You MUST output SELL for a pair if you hold a position AND:\n"
+                "  * Technical signal is SELL or STRONG_SELL (bearish indicators)\n"
+                "  * Fundamental signal is SELL or STRONG_SELL\n"
+                "  * News is bearish with score < -0.3\n"
+                "  * 2+ signal sources turn negative on a held pair\n"
+                "  * Unrealized PnL is worse than -3% (stop-loss territory)\n"
+                "  * Unrealized PnL exceeds +8% and signals are weakening (take-profit)\n"
+                "- SELL decisions should have confidence >= 0.5 — be DECISIVE about exits.\n"
+                "- Protecting capital from drawdowns is as important as entering trades.\n"
+                "- If you have NO position in a pair and signals are bearish, output HOLD.\n\n"
+                "## GENERAL\n"
+                "- Check 'Current Positions' to know what you hold. Only SELL pairs you own.\n"
+                "- Only BUY pairs with no/small position when signals are bullish.\n"
+                "- Size proportionally: high conviction = 15-25%, moderate = 5-15%.\n"
+                "- Provide clear reasoning for every decision.\n"
+                "- DO NOT default everything to HOLD — that is failure.\n\n"
                 f"{skill_text}"
             ),
             output_type=OrchestratorOutput,
@@ -185,15 +197,23 @@ class OrchestratorAgent(BaseAgent):
             )
 
         if positions:
-            pos_lines = ["## Current Positions"]
+            pos_lines = ["## Current Positions (YOU HOLD THESE — only SELL what you hold)"]
             for p in positions:
+                pair_name = p.get('pair', p.get('symbol', '?'))
+                entry = float(p.get('avg_entry_price', 0))
+                current = float(p.get('current_price', 0))
+                unrealized = float(p.get('unrealized_pnl', p.get('unrealized_pl', 0)))
+                pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
+                mv = float(p.get('market_value_usd', p.get('market_value', 0)))
                 pos_lines.append(
-                    f"- {p.get('pair', p.get('symbol', '?'))}: "
-                    f"qty={p.get('qty', 0)}, entry=${p.get('avg_entry_price', 0):,.2f}, "
-                    f"current=${p.get('current_price', 0):,.2f}, "
-                    f"pnl=${p.get('unrealized_pnl', p.get('unrealized_pl', 0)):+,.2f}"
+                    f"- {pair_name}: qty={p.get('qty', 0)}, "
+                    f"entry=${entry:,.2f}, current=${current:,.2f}, "
+                    f"PnL=${unrealized:+,.2f} ({pnl_pct:+.1f}%), "
+                    f"market_value=${mv:,.2f}"
                 )
             sections.append("\n".join(pos_lines))
+        else:
+            sections.append("## Current Positions\nNONE — all cash. Look for BUY opportunities.")
 
         if tech:
             tech_lines = ["## Technical Signals"]
@@ -265,14 +285,15 @@ class OrchestratorAgent(BaseAgent):
             sections.append("\n".join(lr_lines))
 
         sections.append(
-            f"\nMake BUY/SELL/HOLD decisions for each pair. "
-            f"The confidence threshold for action is {self._confidence_threshold}. "
-            f"You MUST output BUY for any pair where signals are net positive and "
-            f"confidence >= {self._confidence_threshold}. Do NOT default to HOLD — "
-            f"deploy capital aggressively. "
-            f"WEIGHT your confidence using the strategy signals and backtest results above. "
+            f"\nMake BUY/SELL/HOLD decisions for each pair.\n"
+            f"Confidence threshold: {self._confidence_threshold}.\n"
+            f"BUY: any pair where signals are net positive and you have no/small position.\n"
+            f"SELL: any HELD pair where signals turned negative, PnL exceeds stop/target, "
+            f"or 2+ signal sources are bearish. Be decisive about protecting capital.\n"
+            f"HOLD: only when no strong signal in either direction.\n"
+            f"Weight confidence using strategy signals and backtest results. "
             f"If multiple backtested strategies agree on BUY, boost confidence. "
-            f"For SELL, close the position to cash."
+            f"DO NOT default to HOLD — deploy or protect aggressively."
         )
 
         return "\n\n".join(sections)

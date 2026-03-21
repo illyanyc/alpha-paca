@@ -149,6 +149,8 @@ def _snapshot() -> dict[str, Any]:
             "max_drawdown_pct": settings.crypto.max_drawdown_pct,
             "max_total_exposure_pct": settings.crypto.max_total_exposure_pct,
             "confidence_threshold": settings.crypto.confidence_threshold,
+            "stop_loss_pct": settings.crypto.stop_loss_pct,
+            "take_profit_pct": settings.crypto.take_profit_pct,
             "pairs": settings.crypto.pairs,
         }
 
@@ -807,6 +809,19 @@ color:var(--text);font-family:inherit;font-size:13px;outline:none}
 </div>
 </div>
 
+<div class="row2">
+<div class="field">
+<label>Stop-Loss (%)</label>
+<input type="number" id="t-stop-loss" min="1" max="50" step="0.5" placeholder="5.0">
+<div class="hint">Auto-sell if position drops below this %</div>
+</div>
+<div class="field">
+<label>Take-Profit (%)</label>
+<input type="number" id="t-take-profit" min="1" max="100" step="0.5" placeholder="12.0">
+<div class="hint">Auto-sell if position gains exceed this %</div>
+</div>
+</div>
+
 <div class="field">
 <label>Confidence Threshold (0-1)</label>
 <input type="number" id="t-confidence" min="0.1" max="1.0" step="0.05" placeholder="0.5">
@@ -828,8 +843,11 @@ color:var(--text);font-family:inherit;font-size:13px;outline:none}
 <div class="section">
 <div class="section-title">ℹ️ Help</div>
 <div style="font-size:12px;color:var(--dim);line-height:1.6">
-<p>• Get API keys from <a href="https://www.coinbase.com/settings/api" target="_blank" style="color:var(--blue)">coinbase.com/settings/api</a></p>
-<p>• Create an <b>Advanced Trade</b> key with <b>Trade</b> + <b>View</b> permissions</p>
+<p>• Get CDP API keys from <a href="https://portal.cdp.coinbase.com/access/api" target="_blank" style="color:var(--blue)">portal.cdp.coinbase.com</a></p>
+<p>• Key name format: <code>organizations/{org_id}/apiKeys/{key_id}</code></p>
+<p>• Secret: PEM EC private key (use <code>\n</code> for newlines in env var)</p>
+<p>• <b>Stop-Loss</b>: auto-sells a position if unrealized loss exceeds threshold</p>
+<p>• <b>Take-Profit</b>: auto-sells a position if unrealized gain exceeds threshold</p>
 <p>• All settings saved here are stored in <b>Redis</b> and override env vars on startup</p>
 </div>
 </div>
@@ -861,6 +879,8 @@ async function loadStatus() {
     if (ts.max_drawdown_pct !== undefined) $('t-max-drawdown').value = ts.max_drawdown_pct;
     if (ts.max_total_exposure_pct !== undefined) $('t-max-exposure').value = ts.max_total_exposure_pct;
     if (ts.confidence_threshold !== undefined) $('t-confidence').value = ts.confidence_threshold;
+    if (ts.stop_loss_pct !== undefined) $('t-stop-loss').value = ts.stop_loss_pct;
+    if (ts.take_profit_pct !== undefined) $('t-take-profit').value = ts.take_profit_pct;
     if (ts.pairs) $('t-pairs').value = ts.pairs;
   } catch(e) { console.error(e); }
 }
@@ -901,6 +921,8 @@ async function saveTradingSettings() {
     max_drawdown_pct: parseFloat($('t-max-drawdown').value) || undefined,
     max_total_exposure_pct: parseFloat($('t-max-exposure').value) || undefined,
     confidence_threshold: parseFloat($('t-confidence').value) || undefined,
+    stop_loss_pct: parseFloat($('t-stop-loss').value) || undefined,
+    take_profit_pct: parseFloat($('t-take-profit').value) || undefined,
     pairs: $('t-pairs').value.trim() || undefined,
   };
   Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);

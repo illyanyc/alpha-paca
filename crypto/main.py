@@ -176,11 +176,106 @@ async def create_tables() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def enrich_positions(exchange_positions: list[dict]) -> list[dict]:
+    """Cross-reference exchange holdings with DB entry prices for accurate PnL."""
+    if not exchange_positions:
+        return []
+
+    async with async_session_factory() as session:
+        stmt = select(CryptoPosition)
+        result = await session.execute(stmt)
+        db_positions = {p.pair: p for p in result.scalars().all()}
+
+    enriched = []
+    for ep in exchange_positions:
+        pair = ep.get("symbol", ep.get("pair", ""))
+        current_price = float(ep.get("current_price", 0))
+        qty = float(ep.get("qty", 0))
+
+        db_pos = db_positions.get(pair)
+        if db_pos and db_pos.avg_entry_price > 0:
+            entry_price = float(db_pos.avg_entry_price)
+        else:
+            entry_price = current_price
+
+        unrealized_pnl = (current_price - entry_price) * qty
+        unrealized_pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+        market_value = qty * current_price
+
+        enriched.append({
+            **ep,
+            "pair": pair,
+            "avg_entry_price": entry_price,
+            "current_price": current_price,
+            "unrealized_pnl": unrealized_pnl,
+            "unrealized_pl": unrealized_pnl,
+            "unrealized_pnl_pct": unrealized_pnl_pct,
+            "market_value": market_value,
+            "market_value_usd": market_value,
+        })
+
+    return enriched
+
+
+async def sync_positions_to_db(enriched_positions: list[dict]) -> None:
+    """Keep DB CryptoPosition rows in sync with actual exchange state."""
+    from decimal import Decimal as D
+
+    async with async_session_factory() as session:
+        stmt = select(CryptoPosition)
+        result = await session.execute(stmt)
+        db_map = {p.pair: p for p in result.scalars().all()}
+
+        exchange_pairs = set()
+        for ep in enriched_positions:
+            pair = ep.get("pair", "")
+            if not pair:
+                continue
+            exchange_pairs.add(pair)
+            qty = D(str(ep.get("qty", 0)))
+            current_price = D(str(ep.get("current_price", 0)))
+            entry_price = D(str(ep.get("avg_entry_price", 0)))
+            mv = D(str(ep.get("market_value_usd", 0)))
+            pnl = D(str(ep.get("unrealized_pnl", 0)))
+
+            if pair in db_map:
+                pos = db_map[pair]
+                pos.current_price = current_price
+                pos.market_value_usd = mv
+                pos.unrealized_pnl = pnl
+                if pos.qty == 0 and qty > 0:
+                    pos.qty = qty
+                    pos.avg_entry_price = entry_price
+            else:
+                session.add(CryptoPosition(
+                    pair=pair,
+                    qty=qty,
+                    avg_entry_price=entry_price,
+                    current_price=current_price,
+                    market_value_usd=mv,
+                    unrealized_pnl=pnl,
+                ))
+
+        for db_pair, db_pos in db_map.items():
+            if db_pair not in exchange_pairs:
+                db_pos.qty = D(0)
+                db_pos.current_price = D(0)
+                db_pos.market_value_usd = D(0)
+                db_pos.unrealized_pnl = D(0)
+
+        await session.commit()
+
+
+_high_water_mark: float = 0.0
+
+
 async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
+    global _high_water_mark
     settings = get_settings()
     try:
         acct = await asyncio.to_thread(exchange.get_account)
-        positions = await asyncio.to_thread(exchange.get_positions)
+        raw_positions = await asyncio.to_thread(exchange.get_positions)
+        positions = await enrich_positions(raw_positions)
     except Exception as e:
         logger.warning("portfolio_state_fallback", error=str(e))
         return {
@@ -192,16 +287,21 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
             "positions_count": 0,
         }
 
-    total_mv = sum(float(p.get("market_value", 0)) for p in positions)
+    total_mv = sum(float(p.get("market_value_usd", p.get("market_value", 0))) for p in positions)
     nav = min(float(acct.get("portfolio_value", settings.crypto.max_capital)), settings.crypto.max_capital)
     exposure = (total_mv / nav * 100) if nav > 0 else 0
+    unrealized = sum(float(p.get("unrealized_pnl", 0)) for p in positions)
+
+    if nav > _high_water_mark:
+        _high_water_mark = nav
+    drawdown_pct = ((_high_water_mark - nav) / _high_water_mark * 100) if _high_water_mark > 0 else 0
 
     return {
         "nav": nav,
         "cash": float(acct.get("cash", 0)),
         "total_exposure_pct": exposure,
-        "unrealized_pnl": sum(float(p.get("unrealized_pl", 0)) for p in positions),
-        "drawdown_pct": 0,
+        "unrealized_pnl": unrealized,
+        "drawdown_pct": drawdown_pct,
         "positions_count": len(positions),
     }
 
@@ -251,11 +351,63 @@ async def tick_30s(
             portfolio = await get_portfolio_state(exchange)
             _state["portfolio"] = portfolio
             try:
-                _state["positions"] = await asyncio.to_thread(exchange.get_positions)
+                raw_pos = await asyncio.to_thread(exchange.get_positions)
+                enriched = await enrich_positions(raw_pos)
+                _state["positions"] = enriched
+                await sync_positions_to_db(enriched)
             except Exception as pos_err:
                 logger.warning("positions_fetch_failed", error=str(pos_err))
         except Exception as e:
             logger.exception("tick_30s_error", error_msg=str(e))
+        await asyncio.sleep(TICK_30S)
+
+
+async def check_protective_exits(
+    exchange: CoinbaseCryptoService,
+    executor: OrderExecutorAgent,
+) -> None:
+    """Run stop-loss and take-profit checks every 30s against held positions."""
+    await asyncio.sleep(20)
+    while not _shutdown.is_set():
+        try:
+            settings = get_settings()
+            positions = _state.get("positions", [])
+
+            for pos in positions:
+                pair = pos.get("pair", pos.get("symbol", ""))
+                pnl_pct = float(pos.get("unrealized_pnl_pct", 0))
+                qty = float(pos.get("qty", 0))
+                if qty <= 0 or not pair:
+                    continue
+
+                if pnl_pct <= -settings.crypto.stop_loss_pct:
+                    logger.warning(
+                        "stop_loss_triggered", pair=pair, pnl_pct=pnl_pct,
+                        threshold=-settings.crypto.stop_loss_pct,
+                    )
+                    await executor.safe_run(
+                        decision={"action": "SELL", "pair": pair, "size_pct": 100,
+                                  "confidence": 0.99,
+                                  "reasoning": f"STOP-LOSS: {pnl_pct:.1f}% loss exceeds -{settings.crypto.stop_loss_pct}% limit"},
+                        price=float(pos.get("current_price", 0)),
+                        available_capital=0,
+                    )
+
+                elif pnl_pct >= settings.crypto.take_profit_pct:
+                    logger.info(
+                        "take_profit_triggered", pair=pair, pnl_pct=pnl_pct,
+                        threshold=settings.crypto.take_profit_pct,
+                    )
+                    await executor.safe_run(
+                        decision={"action": "SELL", "pair": pair, "size_pct": 100,
+                                  "confidence": 0.95,
+                                  "reasoning": f"TAKE-PROFIT: {pnl_pct:.1f}% gain exceeds +{settings.crypto.take_profit_pct}% target"},
+                        price=float(pos.get("current_price", 0)),
+                        available_capital=0,
+                    )
+
+        except Exception as e:
+            logger.exception("protective_exit_error", error_msg=str(e))
         await asyncio.sleep(TICK_30S)
 
 
@@ -283,7 +435,8 @@ async def tick_5m(
                 _state["fund_signals"] = fund_result
 
             try:
-                positions = await asyncio.to_thread(exchange.get_positions)
+                raw_pos = await asyncio.to_thread(exchange.get_positions)
+                positions = await enrich_positions(raw_pos)
                 _state["positions"] = positions
             except Exception as pos_err:
                 logger.warning("positions_fetch_failed", error=str(pos_err), tick="5m")
@@ -423,7 +576,8 @@ async def tick_1h(telegram: TelegramService, exchange: CoinbaseCryptoService) ->
     while not _shutdown.is_set():
         try:
             try:
-                positions = await asyncio.to_thread(exchange.get_positions)
+                raw_pos = await asyncio.to_thread(exchange.get_positions)
+                positions = await enrich_positions(raw_pos)
             except Exception as pos_err:
                 logger.warning("positions_fetch_failed", error=str(pos_err), tick="1h")
                 positions = []
@@ -431,10 +585,10 @@ async def tick_1h(telegram: TelegramService, exchange: CoinbaseCryptoService) ->
             portfolio = await get_portfolio_state(exchange)
             pos_data = [
                 {
-                    "pair": p.get("symbol", ""),
+                    "pair": p.get("pair", p.get("symbol", "")),
                     "qty": p.get("qty", 0),
                     "current_price": p.get("current_price", 0),
-                    "unrealized_pnl": p.get("unrealized_pl", 0),
+                    "unrealized_pnl": p.get("unrealized_pnl", 0),
                 }
                 for p in positions
             ]
@@ -629,6 +783,7 @@ async def run() -> None:
             asyncio.create_task(tick_5m(
                 news_agent, fund_agent, orchestrator, risk_agent, executor, price_tracker, exchange
             ), name="tick_5m"),
+            asyncio.create_task(check_protective_exits(exchange, executor), name="protective_exits"),
             asyncio.create_task(tick_1h(telegram, exchange), name="tick_1h"),
             asyncio.create_task(tick_backtest(exchange, redis_conn), name="backtest"),
             asyncio.create_task(tick_24h(telegram), name="tick_24h"),
