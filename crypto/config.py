@@ -48,15 +48,26 @@ class CryptoTradingSettings(BaseSettings):
         env_prefix="CRYPTO_", env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
     )
     max_capital: float = 0.0
-    pairs: str = "BTC/USD,ETH/USD,SOL/USD,DOGE/USD,LINK/USD"
-    risk_per_trade_pct: float = 2.0
-    max_position_pct: float = 30.0
+    pairs: str = "BTC/USD,ETH/USD,SOL/USD"
+    max_risk_per_trade_pct: float = 5.0
+    max_leverage: float = 5.0
+    min_conviction: float = 0.75
+    daily_loss_halt_pct: float = 5.0
     max_drawdown_pct: float = 10.0
-    max_total_exposure_pct: float = 90.0
-    min_trade_interval_sec: int = 120
-    confidence_threshold: float = 0.55
-    stop_loss_pct: float = 5.0
-    take_profit_pct: float = 12.0
+    max_concurrent_per_bot: int = 3
+    max_concurrent_total: int = 5
+    # Day bot
+    day_min_rr_ratio: float = 1.5
+    day_min_trade_interval_sec: int = 300
+    day_max_hold_hours: float = 6.0
+    day_eval_interval_sec: int = 30
+    # Swing bot
+    swing_min_rr_ratio: float = 2.0
+    swing_min_trade_interval_sec: int = 3600
+    swing_eval_interval_sec: int = 3600
+    # Cooldown
+    cooldown_after_losses: int = 3
+    cooldown_halt_after_losses: int = 5
 
     @property
     def pair_list(self) -> list[str]:

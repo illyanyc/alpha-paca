@@ -1,4 +1,8 @@
-"""OrderExecutorAgent — submits orders to Coinbase, monitors fills, records to DB."""
+"""OrderExecutorAgent — submits orders to Coinbase, monitors fills, records to DB.
+
+Now bot_id-aware: each trade and position is tagged with the originating bot
+so SwingSniper and DaySniper positions don't interfere with each other.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
 from agents.base import BaseAgent
 from db.engine import async_session_factory
@@ -31,119 +35,107 @@ class OrderExecutorAgent(BaseAgent):
         """Execute a trade decision.
 
         kwargs expected:
-            decision: dict with action, pair, size_pct, confidence, reasoning
+            decision: dict with action, pair, confidence, reasoning, bot_id,
+                      target_price, stop_price
+            notional: float — dollar amount to buy (from LeverageSizer)
             price: current mid price for the pair
-            available_capital: float
         """
         decision = kwargs.get("decision", {})
         price = kwargs.get("price", 0)
-        available_capital = kwargs.get("available_capital", 0)
+        notional = kwargs.get("notional", 0)
 
         action = decision.get("action", "HOLD")
         pair = decision.get("pair", "")
-        size_pct = decision.get("size_pct", 0)
         confidence = decision.get("confidence", 0)
         reasoning = decision.get("reasoning", "")
+        bot_id = decision.get("bot_id", "swing")
+        target_price = decision.get("target_price")
+        stop_price = decision.get("stop_price")
 
         if action == "HOLD":
             return {"status": "no_action", "pair": pair}
 
         if action == "BUY":
-            notional = available_capital * (size_pct / 100)
-            self.think(f"⚡ Executing BUY {pair}: ${notional:,.0f} at ${price:,.2f} (conf={confidence:.2f})")
-            return await self._execute_buy(pair, size_pct, price, available_capital, confidence, reasoning)
+            self.think(f"[{bot_id}] BUY {pair}: ${notional:,.0f} @ ${price:,.2f} (conv={confidence:.2f})")
+            return await self._execute_buy(
+                pair, notional, price, confidence, reasoning, bot_id,
+                target_price, stop_price,
+            )
         elif action == "SELL":
-            self.think(f"⚡ Executing SELL {pair} (conf={confidence:.2f})")
-            return await self._execute_sell(pair, confidence, reasoning)
-        elif action == "SHORT":
-            notional = available_capital * (size_pct / 100)
-            self.think(f"⚡ Executing SHORT {pair}: ${notional:,.0f} at ${price:,.2f} (conf={confidence:.2f})")
-            return await self._execute_short(pair, size_pct, price, available_capital, confidence, reasoning)
-        elif action == "COVER":
-            self.think(f"⚡ Executing COVER {pair} (conf={confidence:.2f})")
-            return await self._execute_cover(pair, confidence, reasoning)
+            self.think(f"[{bot_id}] SELL {pair} (conv={confidence:.2f})")
+            return await self._execute_sell(pair, confidence, reasoning, bot_id)
 
         return {"status": "unknown_action", "action": action}
 
     async def _execute_buy(
         self,
         pair: str,
-        size_pct: float,
+        notional: float,
         price: float,
-        available_capital: float,
         confidence: float,
         reasoning: str,
+        bot_id: str,
+        target_price: float | None = None,
+        stop_price: float | None = None,
     ) -> dict:
-        notional = available_capital * (size_pct / 100)
         qty = Decimal(str(notional / price)) if price > 0 else Decimal(0)
-
         if qty <= 0:
             return {"status": "skip", "reason": "zero qty"}
 
         try:
-            logger.info("submitting_buy", pair=pair, qty=str(qty), notional=notional)
+            logger.info("submitting_buy", pair=pair, qty=str(qty), notional=notional, bot=bot_id)
             order_result = await asyncio.to_thread(self._exchange.submit_market_order, pair, qty, "BUY")
-            self.think(f"📤 Order submitted {pair} BUY — id={order_result['order_id'][:8]}... waiting for fill")
+            self.think(f"[{bot_id}] Order submitted {pair} BUY — waiting for fill")
             fill = await self._exchange.wait_for_fill(order_result["order_id"])
 
             filled_price = fill.get("filled_avg_price", price)
             filled_qty = fill.get("filled_qty", float(qty))
-            fill_status = fill.get("status", "unknown")
             slippage_bps = ((filled_price - price) / price * 10000) if price > 0 else 0
 
-            self.think(f"✅ FILLED {pair} BUY: {filled_qty} @ ${filled_price:,.2f} (status={fill_status}, slip={slippage_bps:.1f}bps)")
+            self.think(f"[{bot_id}] FILLED {pair} BUY: {filled_qty} @ ${filled_price:,.2f} (slip={slippage_bps:.1f}bps)")
 
             await self._record_trade(
-                pair=pair,
-                side="BUY",
-                qty=Decimal(str(filled_qty)),
-                price=Decimal(str(filled_price)),
-                confidence=confidence,
-                reasoning=reasoning,
-                slippage_bps=slippage_bps,
-                order_id=order_result["order_id"],
+                pair=pair, side="BUY", qty=Decimal(str(filled_qty)),
+                price=Decimal(str(filled_price)), confidence=confidence,
+                reasoning=reasoning, slippage_bps=slippage_bps,
+                order_id=order_result["order_id"], bot_id=bot_id,
+                target_price=target_price, stop_price=stop_price,
             )
 
-            await self._update_position(pair, Decimal(str(filled_qty)), Decimal(str(filled_price)), is_buy=True)
+            await self._update_position(
+                pair, Decimal(str(filled_qty)), Decimal(str(filled_price)),
+                is_buy=True, bot_id=bot_id,
+            )
 
             await self._telegram.trade_alert(
-                pair=pair, side="BUY", qty=filled_qty,
+                pair=pair, side=f"BUY [{bot_id}]", qty=filled_qty,
                 price=filled_price, confidence=confidence, reasoning=reasoning,
             )
 
-            logger.info(
-                "buy_executed", pair=pair, qty=filled_qty,
-                price=filled_price, slippage_bps=slippage_bps,
-            )
             return {
-                "status": "filled",
-                "pair": pair,
-                "side": "BUY",
-                "qty": filled_qty,
-                "price": filled_price,
-                "slippage_bps": slippage_bps,
-                "order_id": order_result["order_id"],
+                "status": "filled", "pair": pair, "side": "BUY",
+                "qty": filled_qty, "price": filled_price,
+                "slippage_bps": slippage_bps, "order_id": order_result["order_id"],
+                "bot_id": bot_id,
             }
 
         except Exception as e:
-            logger.exception("buy_failed", pair=pair, error=str(e))
-            self.think(f"❌ BUY FAILED {pair}: {e}")
-            await self._telegram.error_alert("Buy Failed", f"{pair}: {e}")
+            logger.exception("buy_failed", pair=pair, bot=bot_id, error=str(e))
+            self.think(f"[{bot_id}] BUY FAILED {pair}: {e}")
+            await self._telegram.error_alert("Buy Failed", f"[{bot_id}] {pair}: {e}")
             return {"status": "error", "pair": pair, "error": str(e)}
 
-    async def _execute_sell(self, pair: str, confidence: float, reasoning: str) -> dict:
-        """Sell entire position (exit long, go to cash).
-
-        Resolves the sellable quantity from (1) DB position, then (2) exchange
-        holdings as fallback, so sells work even if the DB drifted.
-        """
+    async def _execute_sell(self, pair: str, confidence: float, reasoning: str, bot_id: str) -> dict:
+        """Sell the bot's position for a pair."""
         try:
             qty: Decimal = Decimal(0)
             entry_price: Decimal = Decimal(0)
             current_price_ref: float = 0.0
 
             async with async_session_factory() as session:
-                stmt = select(CryptoPosition).where(CryptoPosition.pair == pair)
+                stmt = select(CryptoPosition).where(
+                    and_(CryptoPosition.pair == pair, CryptoPosition.bot_id == bot_id)
+                )
                 result = await session.execute(stmt)
                 position = result.scalar_one_or_none()
 
@@ -162,112 +154,74 @@ class OrderExecutorAgent(BaseAgent):
                         break
 
             if qty <= 0:
-                self.think(f"⏭️ {pair} SELL skipped — no position found on DB or exchange")
+                self.think(f"[{bot_id}] {pair} SELL skipped — no position")
                 return {"status": "skip", "reason": "no position to sell"}
 
             actual_balance = await asyncio.to_thread(self._exchange.get_available_balance, pair)
             if actual_balance <= 0:
-                self.think(f"⏭️ {pair} SELL skipped — zero balance on Coinbase")
+                self.think(f"[{bot_id}] {pair} SELL skipped — zero balance on exchange")
                 return {"status": "skip", "reason": "zero exchange balance"}
             if actual_balance < qty:
-                logger.warning("sell_qty_capped", pair=pair, db_qty=str(qty), exchange_qty=str(actual_balance))
-                self.think(f"⚠️ {pair} sell qty capped: DB={qty} → exchange={actual_balance}")
                 qty = actual_balance
 
             qty = self._exchange._quantize_qty(pair, qty)
             if qty <= 0:
-                self.think(f"⏭️ {pair} SELL skipped — qty too small after rounding")
                 return {"status": "skip", "reason": "qty too small"}
 
-            logger.info("submitting_sell", pair=pair, qty=str(qty))
             order_result = await asyncio.to_thread(self._exchange.submit_market_order, pair, qty, "SELL")
-            self.think(f"📤 Order submitted {pair} SELL — id={order_result['order_id'][:8]}... waiting for fill")
+            self.think(f"[{bot_id}] Order submitted {pair} SELL — waiting for fill")
             fill = await self._exchange.wait_for_fill(order_result["order_id"])
 
             filled_price = fill.get("filled_avg_price", 0)
             filled_qty = fill.get("filled_qty", float(qty))
-            fill_status = fill.get("status", "unknown")
-            self.think(f"✅ FILLED {pair} SELL: {filled_qty} @ ${filled_price:,.2f} (status={fill_status})")
 
             cost_basis = entry_price * qty
             pnl = Decimal(str(filled_price)) * Decimal(str(filled_qty)) - cost_basis
             pnl_pct = float(pnl / cost_basis * 100) if cost_basis > 0 else 0
             slippage_bps = ((filled_price - current_price_ref) / current_price_ref * 10000) if current_price_ref > 0 else 0
 
+            self.think(f"[{bot_id}] FILLED {pair} SELL: {filled_qty} @ ${filled_price:,.2f} PnL=${float(pnl):+,.2f} ({pnl_pct:+.1f}%)")
+
             await self._record_trade(
-                pair=pair,
-                side="SELL",
-                qty=Decimal(str(filled_qty)),
-                price=Decimal(str(filled_price)),
-                confidence=confidence,
-                reasoning=reasoning,
-                slippage_bps=slippage_bps,
-                order_id=order_result["order_id"],
-                pnl=pnl,
-                pnl_pct=pnl_pct,
+                pair=pair, side="SELL", qty=Decimal(str(filled_qty)),
+                price=Decimal(str(filled_price)), confidence=confidence,
+                reasoning=reasoning, slippage_bps=slippage_bps,
+                order_id=order_result["order_id"], bot_id=bot_id,
+                pnl=pnl, pnl_pct=pnl_pct,
             )
 
-            await self._update_position(pair, Decimal(str(filled_qty)), Decimal(str(filled_price)), is_buy=False)
+            await self._update_position(
+                pair, Decimal(str(filled_qty)), Decimal(str(filled_price)),
+                is_buy=False, bot_id=bot_id,
+            )
 
             await record_realized_pnl(pair=pair, pnl=float(pnl), pnl_pct=pnl_pct, side="SELL")
 
             await self._telegram.trade_alert(
-                pair=pair, side="SELL", qty=filled_qty,
+                pair=pair, side=f"SELL [{bot_id}]", qty=filled_qty,
                 price=filled_price, confidence=confidence,
-                reasoning=f"P&L: ${float(pnl):+,.2f} ({pnl_pct:+.1f}%) | {reasoning}",
+                reasoning=f"PnL: ${float(pnl):+,.2f} ({pnl_pct:+.1f}%) | {reasoning}",
             )
 
-            logger.info("sell_executed", pair=pair, qty=filled_qty, price=filled_price, pnl=float(pnl))
             return {
                 "status": "filled", "pair": pair, "side": "SELL",
                 "qty": filled_qty, "price": filled_price,
                 "pnl": float(pnl), "pnl_pct": pnl_pct,
-                "order_id": order_result["order_id"],
+                "order_id": order_result["order_id"], "bot_id": bot_id,
             }
 
         except Exception as e:
-            logger.exception("sell_failed", pair=pair, error=str(e))
-            self.think(f"❌ SELL FAILED {pair}: {e}")
-            await self._telegram.error_alert("Sell Failed", f"{pair}: {e}")
+            logger.exception("sell_failed", pair=pair, bot=bot_id, error=str(e))
+            self.think(f"[{bot_id}] SELL FAILED {pair}: {e}")
+            await self._telegram.error_alert("Sell Failed", f"[{bot_id}] {pair}: {e}")
             return {"status": "error", "pair": pair, "error": str(e)}
-
-    async def _execute_short(
-        self,
-        pair: str,
-        size_pct: float,
-        price: float,
-        available_capital: float,
-        confidence: float,
-        reasoning: str,
-    ) -> dict:
-        """Bearish signal on spot — sell existing long position to go to cash.
-
-        Coinbase spot doesn't support naked short selling.  When the
-        orchestrator signals SHORT we close any long position for the
-        pair instead.  If no position is held we simply stay in cash.
-        """
-        actual_balance = await asyncio.to_thread(self._exchange.get_available_balance, pair)
-        if actual_balance <= 0:
-            self.think(f"⏭️ {pair} SHORT→cash — no position to sell, already in cash")
-            return {"status": "skip", "reason": "no position — already in cash"}
-
-        self.think(f"⚡ SHORT signal → closing long {pair} (spot, qty={actual_balance})")
-        return await self._execute_sell(pair, confidence, f"[SHORT→SELL spot] {reasoning}")
-
-    async def _execute_cover(self, pair: str, confidence: float, reasoning: str) -> dict:
-        """COVER on spot = BUY (re-enter long after a bearish period).
-
-        Since Coinbase spot has no real short positions, COVER simply
-        becomes a new BUY using the orchestrator's suggested size.
-        """
-        self.think(f"⏭️ {pair} COVER on spot — no short position to cover (spot is long-only)")
-        return {"status": "skip", "reason": "spot long-only — no short position to cover"}
 
     async def _record_trade(self, **kwargs) -> None:
         side = kwargs["side"]
-        is_open = side in ("BUY", "SHORT")
+        is_open = side == "BUY"
         async with async_session_factory() as session:
             trade = CryptoTrade(
+                bot_id=kwargs.get("bot_id", "swing"),
                 pair=kwargs["pair"],
                 side=side,
                 qty=kwargs["qty"],
@@ -278,6 +232,8 @@ class OrderExecutorAgent(BaseAgent):
                 slippage_bps=kwargs.get("slippage_bps"),
                 confidence=kwargs.get("confidence"),
                 reasoning=kwargs.get("reasoning"),
+                target_price=kwargs.get("target_price"),
+                stop_price=kwargs.get("stop_price"),
                 status="open" if is_open else "closed",
                 exchange_order_id=kwargs.get("order_id"),
             )
@@ -286,15 +242,17 @@ class OrderExecutorAgent(BaseAgent):
 
     async def _update_position(
         self, pair: str, qty: Decimal, price: Decimal,
-        is_buy: bool, side: str = "long",
+        is_buy: bool, bot_id: str = "swing",
     ) -> None:
         async with async_session_factory() as session:
-            stmt = select(CryptoPosition).where(CryptoPosition.pair == pair)
+            stmt = select(CryptoPosition).where(
+                and_(CryptoPosition.pair == pair, CryptoPosition.bot_id == bot_id)
+            )
             result = await session.execute(stmt)
             position = result.scalar_one_or_none()
 
-            if side == "long" and is_buy:
-                if position and position.side == "long":
+            if is_buy:
+                if position:
                     old_value = position.qty * position.avg_entry_price
                     new_value = qty * price
                     total_qty = position.qty + qty
@@ -302,40 +260,13 @@ class OrderExecutorAgent(BaseAgent):
                     position.qty = total_qty
                     position.current_price = price
                 else:
-                    if position:
-                        await session.delete(position)
-                        await session.flush()
                     position = CryptoPosition(
-                        pair=pair, side="long", qty=qty,
+                        bot_id=bot_id, pair=pair, side="long", qty=qty,
                         avg_entry_price=price, current_price=price,
                     )
                     session.add(position)
-            elif side == "long" and not is_buy:
-                if position and position.side == "long":
-                    position.qty -= qty
-                    if position.qty <= 0:
-                        await session.delete(position)
-                    else:
-                        position.current_price = price
-            elif side == "short" and not is_buy:
-                if position and position.side == "short":
-                    old_value = position.qty * position.avg_entry_price
-                    new_value = qty * price
-                    total_qty = position.qty + qty
-                    position.avg_entry_price = (old_value + new_value) / total_qty if total_qty > 0 else price
-                    position.qty = total_qty
-                    position.current_price = price
-                else:
-                    if position:
-                        await session.delete(position)
-                        await session.flush()
-                    position = CryptoPosition(
-                        pair=pair, side="short", qty=qty,
-                        avg_entry_price=price, current_price=price,
-                    )
-                    session.add(position)
-            elif side == "short" and is_buy:
-                if position and position.side == "short":
+            else:
+                if position:
                     position.qty -= qty
                     if position.qty <= 0:
                         await session.delete(position)

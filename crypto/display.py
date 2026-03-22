@@ -136,8 +136,8 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
 
     if positions:
         pos_table = Table(border_style="dim", show_header=True, header_style="bold", padding=(0, 1), expand=True)
+        pos_table.add_column("Bot", style="bold cyan", max_width=6)
         pos_table.add_column("Asset", style="bold")
-        pos_table.add_column("Side", justify="center")
         pos_table.add_column("Qty", justify="right")
         pos_table.add_column("Entry", justify="right")
         pos_table.add_column("Current", justify="right")
@@ -147,8 +147,8 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
 
         for p in positions:
             pair = p.get("pair", p.get("symbol", "?"))
-            side = p.get("side", "long").upper()
-            side_style = "green" if side == "LONG" else "red"
+            bot_id = p.get("bot_id", "?")
+            bot_style = "green" if bot_id == "swing" else "cyan" if bot_id == "day" else "dim"
             qty = p.get("qty", 0)
             entry = p.get("avg_entry_price", 0)
             current = p.get("current_price", 0)
@@ -160,7 +160,8 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
             alloc = (mv / nav * 100) if nav > 0 else 0
 
             pos_table.add_row(
-                pair, f"[{side_style}]{side}[/]", f"{qty:.6f}",
+                f"[{bot_style}]{bot_id}[/]",
+                pair, f"{qty:.6f}",
                 f"${entry:,.2f}", f"${current:,.2f}", f"${mv:,.2f}",
                 f"[{_pnl_color(pnl)}]${pnl:+,.2f} ({pnl_pct:+.1f}%)[/]",
                 f"[bright_yellow]{alloc:.1f}%[/]",
@@ -287,12 +288,12 @@ def build_strategy_panel(strategy_signals: dict, backtest: dict | None = None) -
 
 def build_thinking_panel(agent_log: list[dict]) -> Panel:
     icons = {
-        "news_scout": "📰", "technical_analyst": "📈", "fundamental_analyst": "🔬",
-        "orchestrator": "🧠", "risk_validator": "🛡️", "order_executor": "⚡",
+        "swing_sniper": "📈", "day_sniper": "⚡", "order_executor": "💰",
+        "news_scout": "📰", "healer": "🩺",
     }
     agent_styles = {
-        "orchestrator": "green", "order_executor": "red", "risk_validator": "bright_yellow",
-        "technical_analyst": "cyan", "fundamental_analyst": "bright_magenta", "news_scout": "yellow",
+        "swing_sniper": "green", "day_sniper": "cyan", "order_executor": "red",
+        "news_scout": "yellow", "healer": "bright_yellow",
     }
 
     lines: list[Text] = []
@@ -317,8 +318,8 @@ def build_thinking_panel(agent_log: list[dict]) -> Panel:
 
 def build_agent_status(agent_statuses: dict[str, str]) -> Panel:
     icons = {
-        "news_scout": "📰", "technical_analyst": "📈", "fundamental_analyst": "🔬",
-        "orchestrator": "🧠", "risk_validator": "🛡️", "order_executor": "⚡",
+        "swing_sniper": "📈", "day_sniper": "⚡", "order_executor": "💰",
+        "news_scout": "📰",
     }
     status_icons = {
         "healthy": "🟢", "running": "🔵", "idle": "⚪", "standby": "🟣",
@@ -348,6 +349,7 @@ def build_trades_panel(recent_trades: list[dict]) -> Panel:
 
     table = Table(border_style="dim", show_header=True, header_style="bold", padding=(0, 1), expand=True)
     table.add_column("Time", style="dim")
+    table.add_column("Bot", max_width=6)
     table.add_column("Side", justify="center")
     table.add_column("Pair")
     table.add_column("Price", justify="right")
@@ -358,8 +360,11 @@ def build_trades_panel(recent_trades: list[dict]) -> Panel:
         side_style = "bold green" if side == "BUY" else "bold red"
         pnl = t.get("pnl", 0) or 0
         time_str = str(t.get("opened_at", ""))[:19]
+        bot_id = t.get("bot_id", "?")
+        bot_style = "green" if bot_id == "swing" else "cyan"
         table.add_row(
-            time_str, f"[{side_style}]{side}[/]", t.get("pair", "?"),
+            time_str, f"[{bot_style}]{bot_id}[/]",
+            f"[{side_style}]{side}[/]", t.get("pair", "?"),
             f"${t.get('entry_price', t.get('price', 0)):,.2f}",
             f"[{_pnl_color(pnl)}]${pnl:+,.2f}[/]",
         )

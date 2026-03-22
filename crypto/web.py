@@ -90,9 +90,11 @@ def _snapshot() -> dict[str, Any]:
         if pnl_pct == 0 and entry * qty > 0:
             pnl_pct = (pnl / (entry * qty) * 100)
         mv = float(p.get("market_value", qty * current))
+        bot_id = p.get("bot_id", "swing")
         positions.append({
             "pair": pair, "side": side, "qty": qty, "entry": entry, "current": current,
             "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2), "value": round(mv, 2),
+            "bot_id": bot_id,
         })
 
     tech = {}
@@ -121,6 +123,7 @@ def _snapshot() -> dict[str, Any]:
             "pnl": float(pnl_val),
             "reasoning": (t.get("reasoning", "") or "")[:40],
             "time": str(t.get("opened_at", ""))[:19],
+            "bot_id": t.get("bot_id", "?"),
         })
 
     portfolio = s.get("portfolio", {})
@@ -147,13 +150,15 @@ def _snapshot() -> dict[str, Any]:
     if settings:
         trading_cfg = {
             "max_capital": settings.crypto.max_capital,
-            "risk_per_trade_pct": settings.crypto.risk_per_trade_pct,
-            "max_position_pct": settings.crypto.max_position_pct,
+            "max_risk_per_trade_pct": settings.crypto.max_risk_per_trade_pct,
+            "max_leverage": settings.crypto.max_leverage,
+            "min_conviction": settings.crypto.min_conviction,
+            "daily_loss_halt_pct": settings.crypto.daily_loss_halt_pct,
             "max_drawdown_pct": settings.crypto.max_drawdown_pct,
-            "max_total_exposure_pct": settings.crypto.max_total_exposure_pct,
-            "confidence_threshold": settings.crypto.confidence_threshold,
-            "stop_loss_pct": settings.crypto.stop_loss_pct,
-            "take_profit_pct": settings.crypto.take_profit_pct,
+            "max_concurrent_per_bot": settings.crypto.max_concurrent_per_bot,
+            "max_concurrent_total": settings.crypto.max_concurrent_total,
+            "day_min_rr_ratio": settings.crypto.day_min_rr_ratio,
+            "swing_min_rr_ratio": settings.crypto.swing_min_rr_ratio,
             "pairs": settings.crypto.pairs,
         }
 
@@ -285,6 +290,43 @@ async def save_trading_settings(request: Request):
     from main import update_trading_settings
     result = await update_trading_settings(body)
     return JSONResponse(result)
+
+
+@app.get("/api/learnings")
+async def api_learnings(request: Request):
+    """View and manage prompt optimizer learnings stored in Redis."""
+    if not _check_session(request):
+        raise HTTPException(status_code=401)
+    try:
+        from agents.prompt_optimizer import get_current_learnings
+        import redis.asyncio as aioredis
+        from config import get_settings
+        settings = get_settings()
+        r = aioredis.from_url(settings.database.redis_url, decode_responses=True)
+        learnings = await get_current_learnings(r)
+        await r.aclose()
+        return JSONResponse(learnings)
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:100]}, status_code=500)
+
+
+@app.delete("/api/learnings/{bot_id}")
+async def api_delete_learnings(request: Request, bot_id: str):
+    """Clear all learnings for a specific bot."""
+    if not _check_session(request):
+        raise HTTPException(status_code=401)
+    if bot_id not in ("swing", "day"):
+        raise HTTPException(status_code=400, detail="bot_id must be 'swing' or 'day'")
+    try:
+        import redis.asyncio as aioredis
+        from config import get_settings
+        settings = get_settings()
+        r = aioredis.from_url(settings.database.redis_url, decode_responses=True)
+        await r.delete(f"crypto:learnings:{bot_id}")
+        await r.aclose()
+        return JSONResponse({"status": "ok", "bot_id": bot_id})
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:100]}, status_code=500)
 
 
 @app.get("/api/candles")
