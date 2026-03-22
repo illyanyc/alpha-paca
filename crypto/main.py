@@ -9,7 +9,12 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env.local")
 
 import redis.asyncio as aioredis
 import structlog

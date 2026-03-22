@@ -57,6 +57,12 @@ class BacktestMetrics:
     false_entries: int = 0
     trades: list[SimTrade] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        self.total_return_pct = float(self.total_return_pct)
+        self.sharpe_ratio = float(self.sharpe_ratio)
+        self.win_rate = float(self.win_rate)
+        self.max_drawdown_pct = float(self.max_drawdown_pct)
+
 
 def _apply_cost(price: float, side: str) -> float:
     """Apply taker fee + slippage to a simulated fill."""
@@ -166,13 +172,13 @@ async def replay_day_bot(
             continue
 
         current_total = capital + (position.qty * price if position else 0)
-        daily_return = (current_total - prev_capital) / prev_capital if prev_capital > 0 else 0
+        daily_return = (current_total - prev_capital) / prev_capital if prev_capital > 0 else 0.0
         daily_returns.append(daily_return)
         prev_capital = current_total
 
         if current_total > high_water:
             high_water = current_total
-        dd = (high_water - current_total) / high_water * 100 if high_water > 0 else 0
+        dd = (high_water - current_total) / high_water * 100 if high_water > 0 else 0.0
         if dd > metrics.max_drawdown_pct:
             metrics.max_drawdown_pct = dd
 
@@ -191,7 +197,7 @@ async def replay_day_bot(
 
     if metrics.trades:
         winners = [t for t in metrics.trades if t.pnl > 0]
-        metrics.win_rate = len(winners) / len(metrics.trades)
+        metrics.win_rate = float(len(winners) / len(metrics.trades))
         metrics.false_entries = sum(1 for t in metrics.trades if t.hit_stop)
         rr_values = []
         for t in metrics.trades:
@@ -200,15 +206,15 @@ async def replay_day_bot(
                 reward = abs((t.exit_price or t.entry_price) - t.entry_price)
                 if risk > 0:
                     rr_values.append(reward / risk)
-        metrics.avg_rr_achieved = sum(rr_values) / len(rr_values) if rr_values else 0
+        metrics.avg_rr_achieved = sum(rr_values) / len(rr_values) if rr_values else 0.0
 
     if daily_returns and len(daily_returns) > 1:
         mean_r = sum(daily_returns) / len(daily_returns)
         std_r = math.sqrt(sum((r - mean_r) ** 2 for r in daily_returns) / len(daily_returns))
-        metrics.sharpe_ratio = (mean_r / std_r * math.sqrt(252)) if std_r > 0 else 0
+        metrics.sharpe_ratio = (mean_r / std_r * math.sqrt(252)) if std_r > 0 else 0.0
 
     candle_span_days = len(candles_5m) * 5 / (60 * 24)
-    metrics.trades_per_day = metrics.total_trades / candle_span_days if candle_span_days > 0 else 0
+    metrics.trades_per_day = metrics.total_trades / candle_span_days if candle_span_days > 0 else 0.0
 
     return metrics
 
@@ -305,13 +311,13 @@ async def replay_swing_bot(
             continue
 
         current_total = capital + (position.qty * price if position else 0)
-        daily_return = (current_total - prev_capital) / prev_capital if prev_capital > 0 else 0
+        daily_return = (current_total - prev_capital) / prev_capital if prev_capital > 0 else 0.0
         daily_returns.append(daily_return)
         prev_capital = current_total
 
         if current_total > high_water:
             high_water = current_total
-        dd = (high_water - current_total) / high_water * 100 if high_water > 0 else 0
+        dd = (high_water - current_total) / high_water * 100 if high_water > 0 else 0.0
         if dd > metrics.max_drawdown_pct:
             metrics.max_drawdown_pct = dd
 
@@ -330,16 +336,16 @@ async def replay_swing_bot(
 
     if metrics.trades:
         winners = [t for t in metrics.trades if t.pnl > 0]
-        metrics.win_rate = len(winners) / len(metrics.trades)
+        metrics.win_rate = float(len(winners) / len(metrics.trades))
         metrics.false_entries = sum(1 for t in metrics.trades if t.hit_stop)
 
     if daily_returns and len(daily_returns) > 1:
         mean_r = sum(daily_returns) / len(daily_returns)
         std_r = math.sqrt(sum((r - mean_r) ** 2 for r in daily_returns) / len(daily_returns))
-        metrics.sharpe_ratio = (mean_r / std_r * math.sqrt(252)) if std_r > 0 else 0
+        metrics.sharpe_ratio = (mean_r / std_r * math.sqrt(252)) if std_r > 0 else 0.0
 
     candle_span_days = len(candles_4h) * 4 / 24
-    metrics.trades_per_day = metrics.total_trades / candle_span_days if candle_span_days > 0 else 0
+    metrics.trades_per_day = metrics.total_trades / candle_span_days if candle_span_days > 0 else 0.0
 
     return metrics
 

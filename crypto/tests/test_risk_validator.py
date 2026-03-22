@@ -50,7 +50,7 @@ async def test_reject_exposure_breach(risk_agent):
 @pytest.mark.asyncio
 async def test_reject_position_limit(risk_agent):
     result = await risk_agent.run(
-        decision={"action": "BUY", "pair": "BTC/USD", "size_pct": 25, "confidence": 0.8},
+        decision={"action": "BUY", "pair": "BTC/USD", "size_pct": 40, "confidence": 0.8},
         positions=[{"pair": "BTC/USD", "market_value_usd": 200, "nav": 1000}],
         portfolio_state={"nav": 1000, "cash": 800, "total_exposure_pct": 20, "drawdown_pct": 0},
     )

@@ -34,28 +34,37 @@ class OptimizerOutput(BaseModel):
     summary: str
 
 
-_optimizer_agent = Agent(
-    "anthropic:claude-sonnet-4-20250514",
-    instructions=(
-        "You are a trading system analyst. You review trade journal entries and backtest "
-        "metrics to identify systematic patterns — both failures and successes.\n\n"
-        "Your job is to generate SPECIFIC, ACTIONABLE learnings that can be injected into "
-        "trading bot prompts to improve future performance.\n\n"
-        "## Rules\n"
-        "- Each learning must be specific (mention exact pairs, time windows, indicator values)\n"
-        "- Only suggest learnings backed by data (minimum 3 data points)\n"
-        "- Assign a confidence score based on sample size and consistency\n"
-        "- Focus on failure patterns first, then optimization opportunities\n"
-        "- Keep learnings concise (1-2 sentences each)\n"
-        "- Never suggest removing core safety rules\n\n"
-        "## Examples of Good Learnings\n"
-        "- 'Avoid BTC entries between 00:00-06:00 UTC (70% stop-out rate, n=7)'\n"
-        "- 'SOL has 30% win rate — require conviction >= 0.85 (n=10)'\n"
-        "- 'When RSI > 75 on 4H, swing entries have 25% success — wait for pullback (n=8)'\n"
-        "- 'VWAP mean-reversion on ETH works best when ATR < 2% (win rate 80%, n=5)'\n"
-    ),
-    output_type=OptimizerOutput,
+_OPTIMIZER_INSTRUCTIONS = (
+    "You are a trading system analyst. You review trade journal entries and backtest "
+    "metrics to identify systematic patterns — both failures and successes.\n\n"
+    "Your job is to generate SPECIFIC, ACTIONABLE learnings that can be injected into "
+    "trading bot prompts to improve future performance.\n\n"
+    "## Rules\n"
+    "- Each learning must be specific (mention exact pairs, time windows, indicator values)\n"
+    "- Only suggest learnings backed by data (minimum 3 data points)\n"
+    "- Assign a confidence score based on sample size and consistency\n"
+    "- Focus on failure patterns first, then optimization opportunities\n"
+    "- Keep learnings concise (1-2 sentences each)\n"
+    "- Never suggest removing core safety rules\n\n"
+    "## Examples of Good Learnings\n"
+    "- 'Avoid BTC entries between 00:00-06:00 UTC (70% stop-out rate, n=7)'\n"
+    "- 'SOL has 30% win rate — require conviction >= 0.85 (n=10)'\n"
+    "- 'When RSI > 75 on 4H, swing entries have 25% success — wait for pullback (n=8)'\n"
+    "- 'VWAP mean-reversion on ETH works best when ATR < 2% (win rate 80%, n=5)'\n"
 )
+
+_optimizer_agent: Agent | None = None
+
+
+def _get_optimizer_agent() -> Agent:
+    global _optimizer_agent
+    if _optimizer_agent is None:
+        _optimizer_agent = Agent(
+            "anthropic:claude-sonnet-4-20250514",
+            instructions=_OPTIMIZER_INSTRUCTIONS,
+            output_type=OptimizerOutput,
+        )
+    return _optimizer_agent
 
 
 async def run_prompt_optimization(
@@ -129,7 +138,8 @@ async def run_prompt_optimization(
 
     prompt = "\n".join(prompt_sections)
 
-    result = await _optimizer_agent.run(prompt)
+    agent = _get_optimizer_agent()
+    result = await agent.run(prompt)
     return result.output
 
 

@@ -73,6 +73,23 @@ class CryptoTradingSettings(BaseSettings):
     def pair_list(self) -> list[str]:
         return [p.strip() for p in self.pairs.split(",") if p.strip()]
 
+    # Backward-compat aliases for legacy modules (position_sizer, risk_validator)
+    @property
+    def risk_per_trade_pct(self) -> float:
+        return self.max_risk_per_trade_pct
+
+    @property
+    def max_position_pct(self) -> float:
+        return self.max_risk_per_trade_pct * 10
+
+    @property
+    def max_total_exposure_pct(self) -> float:
+        return 100.0
+
+    @property
+    def min_trade_interval_sec(self) -> int:
+        return self.day_min_trade_interval_sec
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
