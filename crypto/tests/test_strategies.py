@@ -1,4 +1,4 @@
-"""Tests for aggressive trading strategies."""
+"""Tests for institutional-grade trading strategies."""
 
 import sys
 from pathlib import Path
@@ -9,16 +9,19 @@ import pytest
 
 from engine.strategies import (
     ALL_STRATEGIES,
-    mean_reversion,
-    momentum_breakout,
+    ema_ribbon,
+    funding_rate_arb,
+    liquidity_grab,
+    mean_reversion_zscore,
+    momentum_cascade,
+    order_flow_momentum,
     run_all_strategies,
-    scalp_micro,
-    trend_rider,
+    vwap_reversion,
+    volatility_breakout,
 )
 
 
 def _make_bars(prices: list[float], base_vol: float = 1000) -> list[dict]:
-    """Generate synthetic OHLCV bars from a list of close prices."""
     bars = []
     for i, p in enumerate(prices):
         bars.append({
@@ -35,131 +38,146 @@ def _make_bars(prices: list[float], base_vol: float = 1000) -> list[dict]:
 
 def _make_indicators(**overrides) -> dict:
     defaults = {
-        "rsi": 50, "macd_hist": 0.01, "close": 100,
+        "rsi": 50, "macd_hist": 0.01, "close": 100, "high": 101, "low": 99,
         "bb_upper": 110, "bb_lower": 90, "bb_middle": 100,
         "vwap": 100, "volume": 1000, "volume_sma": 800,
-        "williams_r": -50, "ema_9": 101, "ema_21": 100,
-        "momentum_5": 0.01, "momentum_10": 0.015,
-        "atr": 2.0,
+        "williams_r": -50, "ema_8": 101.5, "ema_9": 101, "ema_13": 100.5,
+        "ema_21": 100, "ema_34": 99.5, "ema_55": 99,
+        "momentum_5": 0.01, "momentum_10": 0.015, "momentum_20": 0.02,
+        "volume_momentum": 0.1,
+        "atr": 2.0, "atr_sma_20": 1.5,
+        "kc_upper": 108, "kc_middle": 100, "kc_lower": 92,
     }
     defaults.update(overrides)
     return defaults
 
 
-class TestMomentumBreakout:
-    def test_insufficient_bars_returns_neutral(self):
+class TestVolatilityBreakout:
+    def test_insufficient_bars_neutral(self):
         bars = _make_bars([100] * 5)
-        sig = momentum_breakout(bars, _make_indicators())
+        sig = volatility_breakout(bars, _make_indicators())
         assert sig["signal"] == "neutral"
-        assert sig["name"] == "momentum_breakout"
 
-    def test_breakout_above_high_is_buy(self):
-        prices = [100] * 20 + [105]
-        bars = _make_bars(prices)
-        sig = momentum_breakout(bars, _make_indicators(ema_9=105, ema_21=100))
+    def test_breakout_above_kc(self):
+        sig = volatility_breakout(
+            _make_bars([100] * 30),
+            _make_indicators(close=110, kc_upper=108, atr=3, atr_sma_20=1.5),
+        )
         assert sig["signal"] == "buy"
         assert sig["score"] > 0.3
-        assert sig["confidence"] > 0.3
 
-    def test_breakdown_below_low_is_sell(self):
-        prices = [100] * 20 + [94]
-        bars = _make_bars(prices)
-        sig = momentum_breakout(bars, _make_indicators(ema_9=94, ema_21=100))
+    def test_breakdown_below_kc(self):
+        sig = volatility_breakout(
+            _make_bars([100] * 30),
+            _make_indicators(close=88, kc_lower=92, atr=3, atr_sma_20=1.5),
+        )
         assert sig["signal"] == "sell"
         assert sig["score"] < -0.3
 
-    def test_consolidation_is_neutral(self):
-        prices = [100] * 20
-        bars = _make_bars(prices)
-        sig = momentum_breakout(bars, _make_indicators())
-        assert sig["signal"] == "neutral"
 
-
-class TestMeanReversion:
-    def test_insufficient_bars_returns_neutral(self):
+class TestMeanReversionZscore:
+    def test_insufficient_bars_neutral(self):
         bars = _make_bars([100] * 10)
-        sig = mean_reversion(bars, _make_indicators())
+        sig = mean_reversion_zscore(bars, _make_indicators())
         assert sig["signal"] == "neutral"
 
-    def test_oversold_extreme_is_buy(self):
-        prices = [100] * 20 + [90]
-        bars = _make_bars(prices)
-        sig = mean_reversion(bars, _make_indicators(rsi=25, williams_r=-90, close=90))
+    def test_extreme_oversold(self):
+        prices = [100] * 55 + [85]
+        sig = mean_reversion_zscore(_make_bars(prices), _make_indicators(rsi=25, williams_r=-92))
         assert sig["signal"] == "buy"
         assert sig["score"] > 0.4
 
-    def test_overbought_extreme_is_sell(self):
-        prices = [100] * 20 + [112]
-        bars = _make_bars(prices)
-        sig = mean_reversion(bars, _make_indicators(rsi=75, close=112))
+    def test_extreme_overbought(self):
+        prices = [100] * 55 + [115]
+        sig = mean_reversion_zscore(_make_bars(prices), _make_indicators(rsi=78))
         assert sig["signal"] == "sell"
         assert sig["score"] < -0.3
 
-    def test_near_mean_is_neutral(self):
-        prices = [100] * 25
-        bars = _make_bars(prices)
-        sig = mean_reversion(bars, _make_indicators())
-        assert abs(sig["score"]) < 0.3
 
-
-class TestScalpMicro:
+class TestMomentumCascade:
     def test_insufficient_bars_neutral(self):
-        bars = _make_bars([100] * 5)
-        sig = scalp_micro(bars, _make_indicators())
+        sig = momentum_cascade(_make_bars([100] * 5), _make_indicators())
         assert sig["signal"] == "neutral"
 
-    def test_pullback_in_uptrend_is_buy(self):
-        prices = [95, 96, 97, 98, 99, 100, 101, 100.5, 100, 99.5]
-        bars = _make_bars(prices)
-        sig = scalp_micro(bars, _make_indicators(macd_hist=0.05, vwap=100))
-        assert sig["signal"] == "buy"
-        assert sig["score"] > 0
-
-    def test_rally_in_downtrend_is_sell(self):
-        prices = [105, 104, 103, 102, 101, 100, 99, 99.5, 100, 100.5]
-        bars = _make_bars(prices)
-        sig = scalp_micro(bars, _make_indicators())
-        assert sig["signal"] == "sell"
-        assert sig["score"] < 0
-
-
-class TestTrendRider:
-    def test_insufficient_bars_neutral(self):
-        bars = _make_bars([100] * 10)
-        sig = trend_rider(bars, _make_indicators())
-        assert sig["signal"] == "neutral"
-
-    def test_strong_uptrend_is_buy(self):
-        prices = list(range(95, 125))
-        bars = _make_bars(prices)
-        sig = trend_rider(bars, _make_indicators(
-            ema_9=123, ema_21=118, momentum_5=0.03, momentum_10=0.05, macd_hist=0.5
-        ))
+    def test_all_bull_factors(self):
+        sig = momentum_cascade(
+            _make_bars([100] * 30),
+            _make_indicators(momentum_5=0.02, momentum_10=0.03, momentum_20=0.05, volume_momentum=0.5, rsi=60),
+        )
         assert sig["signal"] == "buy"
         assert sig["score"] > 0.5
-        assert sig["confidence"] > 0.5
 
-    def test_strong_downtrend_is_sell(self):
-        prices = list(range(125, 95, -1))
-        bars = _make_bars(prices)
-        sig = trend_rider(bars, _make_indicators(
-            ema_9=97, ema_21=105, momentum_5=-0.03, momentum_10=-0.05, macd_hist=-0.5
-        ))
+
+class TestLiquidityGrab:
+    def test_insufficient_bars_neutral(self):
+        sig = liquidity_grab(_make_bars([100] * 5), _make_indicators())
+        assert sig["signal"] == "neutral"
+
+
+class TestVwapReversion:
+    def test_insufficient_bars_neutral(self):
+        sig = vwap_reversion(_make_bars([100] * 5), _make_indicators())
+        assert sig["signal"] == "neutral"
+
+
+class TestEmaRibbon:
+    def test_insufficient_bars_neutral(self):
+        sig = ema_ribbon(_make_bars([100] * 20), _make_indicators())
+        assert sig["signal"] == "neutral"
+
+    def test_bullish_alignment(self):
+        sig = ema_ribbon(
+            _make_bars([100] * 65),
+            _make_indicators(ema_8=105, ema_13=104, ema_21=103, ema_34=102, ema_55=101, macd_hist=0.1),
+        )
+        assert sig["signal"] == "buy"
+        assert sig["score"] > 0.3
+
+
+class TestOrderFlowMomentum:
+    def test_no_micro_data_neutral(self):
+        sig = order_flow_momentum(_make_bars([100] * 30), _make_indicators())
+        assert sig["signal"] == "neutral"
+
+    def test_strong_buy_flow(self):
+        sig = order_flow_momentum(
+            _make_bars([100] * 30), _make_indicators(),
+            microstructure={"imbalance": 0.5, "flow": 0.5, "vpin": 0.8},
+        )
+        assert sig["signal"] == "buy"
+        assert sig["score"] > 0.5
+
+
+class TestFundingRateArb:
+    def test_no_funding_neutral(self):
+        sig = funding_rate_arb(_make_bars([100] * 30), _make_indicators())
+        assert sig["signal"] == "neutral"
+
+    def test_extreme_positive_funding(self):
+        sig = funding_rate_arb(
+            _make_bars([100] * 30), _make_indicators(),
+            onchain={"btc_funding": 0.001},
+        )
         assert sig["signal"] == "sell"
-        assert sig["score"] < -0.5
+
+    def test_extreme_negative_funding(self):
+        sig = funding_rate_arb(
+            _make_bars([100] * 30), _make_indicators(),
+            onchain={"btc_funding": -0.001},
+        )
+        assert sig["signal"] == "buy"
 
 
 class TestRunAllStrategies:
-    def test_returns_all_four(self):
-        prices = list(range(90, 130))
-        bars = _make_bars(prices)
+    def test_returns_all_eight(self):
+        bars = _make_bars(list(range(90, 160)))
         results = run_all_strategies(bars, _make_indicators())
-        assert len(results) == 4
+        assert len(results) == 8
         names = {r["name"] for r in results}
-        assert names == {"momentum_breakout", "mean_reversion", "scalp_micro", "trend_rider"}
+        assert names == set(ALL_STRATEGIES.keys())
 
     def test_all_have_required_keys(self):
-        bars = _make_bars([100] * 40)
+        bars = _make_bars([100] * 60)
         results = run_all_strategies(bars, _make_indicators())
         for r in results:
             assert "signal" in r
@@ -168,7 +186,7 @@ class TestRunAllStrategies:
             assert "name" in r
 
     def test_scores_bounded(self):
-        bars = _make_bars(list(range(80, 130)))
+        bars = _make_bars(list(range(80, 150)))
         results = run_all_strategies(bars, _make_indicators())
         for r in results:
             assert -1.0 <= r["score"] <= 1.0
@@ -176,8 +194,8 @@ class TestRunAllStrategies:
 
 
 class TestAllStrategiesRegistry:
-    def test_registry_has_four_entries(self):
-        assert len(ALL_STRATEGIES) == 4
+    def test_registry_has_eight_entries(self):
+        assert len(ALL_STRATEGIES) == 8
 
     def test_all_callables(self):
         for name, fn in ALL_STRATEGIES.items():

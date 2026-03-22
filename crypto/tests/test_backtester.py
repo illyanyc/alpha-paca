@@ -55,38 +55,39 @@ def _make_mean_reverting_bars(n: int = 200, center: float = 100) -> list[dict]:
 class TestBacktestStrategy:
     def test_insufficient_bars_returns_zero_trades(self):
         bars = _make_trending_bars(20)
-        result = backtest_strategy("momentum_breakout", ALL_STRATEGIES["momentum_breakout"], bars)
+        result = backtest_strategy("momentum_cascade", ALL_STRATEGIES["momentum_cascade"], bars)
         assert result.total_trades == 0
 
     def test_trending_market_produces_trades(self):
         bars = _make_trending_bars(200)
-        result = backtest_strategy("momentum_breakout", ALL_STRATEGIES["momentum_breakout"], bars)
+        result = backtest_strategy("momentum_cascade", ALL_STRATEGIES["momentum_cascade"], bars)
         assert result.total_trades >= 0
         assert isinstance(result.win_rate, float)
         assert isinstance(result.sharpe, float)
 
     def test_mean_reverting_market_produces_trades(self):
         bars = _make_mean_reverting_bars(200)
-        result = backtest_strategy("mean_reversion", ALL_STRATEGIES["mean_reversion"], bars)
+        result = backtest_strategy("mean_reversion_zscore", ALL_STRATEGIES["mean_reversion_zscore"], bars)
         assert isinstance(result.total_trades, int)
 
     def test_result_fields_valid(self):
         bars = _make_trending_bars(200)
-        result = backtest_strategy("trend_rider", ALL_STRATEGIES["trend_rider"], bars)
-        assert result.name == "trend_rider"
+        result = backtest_strategy("ema_ribbon", ALL_STRATEGIES["ema_ribbon"], bars)
+        assert result.name == "ema_ribbon"
         assert 0 <= result.win_rate <= 1.0
         assert result.wins + result.losses == result.total_trades
         assert result.max_drawdown_pct >= 0
 
     def test_to_dict(self):
         bars = _make_trending_bars(200)
-        result = backtest_strategy("scalp_micro", ALL_STRATEGIES["scalp_micro"], bars)
+        result = backtest_strategy("volatility_breakout", ALL_STRATEGIES["volatility_breakout"], bars)
         d = result.to_dict()
         assert "name" in d
         assert "sharpe" in d
         assert "win_rate" in d
         assert "total_pnl_pct" in d
         assert "weight" in d
+        assert "per_regime" in d
 
 
 class TestBacktestAll:

@@ -33,9 +33,12 @@ from db.models import CryptoPortfolioState, CryptoPosition, CryptoTrade
 from display import build_full_display
 from engine.backtester import run_backtest_cycle
 from engine.learner import AdaptiveLearner
+from engine.microstructure import MicrostructureEngine
 from engine.position_sizer import compute_position_size
+from engine.regime import detect_regime
 from engine.strategies import run_all_strategies
 from services.coinbase_crypto import CoinbaseCryptoService
+from services.onchain_client import fetch_all_onchain
 from services.price_tracker import PriceTracker
 from services.telegram import TelegramService
 from web import app as web_app, init_web
@@ -332,6 +335,12 @@ _high_water_mark: float = 0.0
 
 
 async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
+    """Fetch real Coinbase account equity and positions.
+
+    NAV always reflects the true Coinbase account value.
+    max_capital is only used to cap *tradeable* capital in position sizing,
+    never to distort NAV reporting.
+    """
     global _high_water_mark
     settings = get_settings()
     try:
@@ -339,21 +348,20 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
         raw_positions = await asyncio.to_thread(exchange.get_positions)
         positions = await enrich_positions(raw_positions)
     except Exception as e:
-        logger.warning("portfolio_state_fallback", error=str(e))
-        fallback_nav = settings.crypto.max_capital if settings.crypto.max_capital > 0 else 0
+        logger.error("portfolio_state_error", error=str(e), exc_info=True)
+        prev = _state.get("portfolio", {})
         return {
-            "nav": fallback_nav,
-            "cash": fallback_nav,
-            "total_exposure_pct": 0,
-            "unrealized_pnl": 0,
-            "drawdown_pct": 0,
-            "positions_count": 0,
+            "nav": prev.get("nav", 0),
+            "cash": prev.get("cash", 0),
+            "total_exposure_pct": prev.get("total_exposure_pct", 0),
+            "unrealized_pnl": prev.get("unrealized_pnl", 0),
+            "drawdown_pct": prev.get("drawdown_pct", 0),
+            "positions_count": prev.get("positions_count", 0),
         }
 
     total_mv = sum(float(p.get("market_value_usd", p.get("market_value", 0))) for p in positions)
-    raw_nav = float(acct.get("portfolio_value", 0)) or float(acct.get("equity", 0))
-    cap = settings.crypto.max_capital
-    nav = min(raw_nav, cap) if cap > 0 else raw_nav
+    nav = float(acct.get("portfolio_value", 0)) or float(acct.get("equity", 0))
+    cash = float(acct.get("cash", 0))
     exposure = (total_mv / nav * 100) if nav > 0 else 0
     unrealized = sum(float(p.get("unrealized_pnl", 0)) for p in positions)
 
@@ -364,8 +372,8 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
     pnl_s = _state.get("pnl_summary", {})
     return {
         "nav": nav,
-        "cash": float(acct.get("cash", 0)),
-        "total_exposure_pct": exposure,
+        "cash": cash,
+        "total_exposure_pct": round(exposure, 1),
         "unrealized_pnl": unrealized,
         "drawdown_pct": drawdown_pct,
         "positions_count": len(positions),
@@ -404,6 +412,41 @@ async def tick_30s(
                 _state["tech_signals"] = result
 
             settings = get_settings()
+            r = await tech_agent._get_redis()
+
+            regime_str = None
+            try:
+                first_pair = settings.crypto.pair_list[0]
+                hourly_bars = await asyncio.to_thread(exchange.get_bars, first_pair, granularity="ONE_HOUR", lookback_minutes=168 * 60)
+                if len(hourly_bars) >= 48:
+                    hourly_closes = [b["close"] for b in hourly_bars]
+                    regime_state = detect_regime(hourly_closes)
+                    regime_dict = {
+                        "regime": regime_state.regime.value,
+                        "confidence": regime_state.confidence,
+                        "label": regime_state.label,
+                        "features": regime_state.features,
+                    }
+                    _state["regime"] = regime_dict
+                    regime_str = regime_state.regime.value
+                    await r.set("crypto:regime", json.dumps(regime_dict), ex=600)
+            except Exception:
+                logger.debug("regime_detection_skipped")
+
+            micro_engine: MicrostructureEngine = _state.get("micro_engine")
+            if micro_engine:
+                micro_states = micro_engine.get_all_states()
+                micro_dict = {}
+                for pair, ms in micro_states.items():
+                    micro_dict[pair] = {
+                        "signal": ms.signal, "score": ms.score,
+                        "imbalance": ms.bid_ask_imbalance,
+                        "flow": ms.trade_flow_imbalance,
+                        "vpin": ms.vpin, "spread_bps": ms.spread_bps,
+                    }
+                _state["microstructure"] = micro_dict
+                await r.set("crypto:microstructure", json.dumps(micro_dict), ex=120)
+
             strat_signals: dict[str, list] = {}
             for pair in settings.crypto.pair_list:
                 try:
@@ -411,17 +454,32 @@ async def tick_30s(
                     if len(bars) >= 30:
                         from engine.indicators import compute_all
                         ind = compute_all(bars)
-                        sigs = run_all_strategies(bars, ind)
+                        micro_data = _state.get("microstructure", {}).get(pair, {})
+                        onchain_data = _state.get("onchain", {})
+                        if hasattr(onchain_data, "__dict__"):
+                            onchain_data = {"btc_funding": onchain_data.btc_funding_rate}
+                        sigs = run_all_strategies(
+                            bars, ind, regime=regime_str,
+                            microstructure=micro_data,
+                            onchain=onchain_data if isinstance(onchain_data, dict) else {},
+                        )
                         strat_signals[pair] = sigs
                 except Exception:
                     pass
             if strat_signals:
                 _state["strategy_signals"] = strat_signals
-                r = await tech_agent._get_redis()
                 await r.set("crypto:signals:strategies", json.dumps(strat_signals), ex=120)
 
             portfolio = await get_portfolio_state(exchange)
             _state["portfolio"] = portfolio
+
+            nav = portfolio.get("nav", 0)
+            if nav > 0:
+                curve = _state.get("equity_curve", [])
+                curve.append({"ts": datetime.now(timezone.utc).isoformat(), "nav": nav})
+                if len(curve) > 2880:
+                    _state["equity_curve"] = curve[-2880:]
+
             try:
                 raw_pos = await asyncio.to_thread(exchange.get_positions)
                 enriched = await enrich_positions(raw_pos)
@@ -498,9 +556,10 @@ async def tick_5m(
     await asyncio.sleep(10)
     while not _shutdown.is_set():
         try:
-            news_result, fund_result = await asyncio.gather(
+            news_result, fund_result, onchain = await asyncio.gather(
                 news_agent.safe_run(),
                 fund_agent.safe_run(),
+                fetch_all_onchain(),
             )
 
             if isinstance(news_result, dict) and "error" not in news_result:
@@ -508,6 +567,22 @@ async def tick_5m(
 
             if isinstance(fund_result, dict) and "error" not in fund_result:
                 _state["fund_signals"] = fund_result
+
+            if onchain:
+                oc_dict = {
+                    "fear_greed_index": onchain.fear_greed_index,
+                    "fear_greed_label": onchain.fear_greed_label,
+                    "btc_funding_rate": onchain.btc_funding_rate,
+                    "eth_funding_rate": onchain.eth_funding_rate,
+                    "signal": onchain.signal,
+                    "score": onchain.score,
+                }
+                _state["onchain"] = oc_dict
+                try:
+                    r = await news_agent._get_redis()
+                    await r.set("crypto:onchain", json.dumps(oc_dict), ex=600)
+                except Exception:
+                    pass
 
             try:
                 raw_pos = await asyncio.to_thread(exchange.get_positions)
@@ -569,10 +644,14 @@ async def tick_5m(
                 if mid_price <= 0:
                     continue
 
+                cash = portfolio.get("cash", 0)
+                cap = settings.crypto.max_capital
+                tradeable = min(cash, cap) if cap > 0 else cash
+
                 exec_result = await executor.safe_run(
                     decision=decision,
                     price=mid_price,
-                    available_capital=portfolio.get("cash", 0),
+                    available_capital=tradeable,
                 )
 
                 logger.info(
@@ -729,6 +808,13 @@ async def display_loop(live: Live, settings) -> None:
                 healing_events=_state.get("healing_events", []),
                 mode=mode,
                 uptime_sec=uptime,
+                regime=_state.get("regime"),
+                exchange_status=_state.get("exchange_status", "checking"),
+                onchain=_state.get("onchain"),
+                microstructure=_state.get("microstructure"),
+                strategy_signals=_state.get("strategy_signals"),
+                backtest=_state.get("backtest_results"),
+                agent_log=_state.get("agent_log"),
             )
             live.update(display)
         except Exception:
@@ -764,8 +850,15 @@ async def run() -> None:
 
     redis_trading = await load_trading_settings()
     if redis_trading:
-        logger.info("using_redis_trading_settings", keys=list(redis_trading.keys()))
+        skip_keys = set()
+        if settings.crypto.max_capital == 0 and redis_trading.get("max_capital", 0) > 0:
+            skip_keys.add("max_capital")
+            logger.info("redis_max_capital_skipped",
+                        hint="env CRYPTO_MAX_CAPITAL=0 (whole account) takes precedence over Redis value")
+        logger.info("using_redis_trading_settings", keys=list(redis_trading.keys()), skipped=list(skip_keys))
         for k, v in redis_trading.items():
+            if k in skip_keys:
+                continue
             if hasattr(settings.crypto, k):
                 setattr(settings.crypto, k, type(getattr(settings.crypto, k))(v))
 
@@ -822,12 +915,18 @@ async def run() -> None:
     risk_agent = RiskValidatorAgent()
     executor = OrderExecutorAgent(exchange, telegram)
 
-    init_nav = float(acct.get("equity", acct.get("portfolio_value", 0))) if exchange.is_authenticated and acct else 0
-    cap_label = "Whole account" if settings.crypto.max_capital <= 0 else f"${settings.crypto.max_capital:,.0f}"
+    micro_engine = MicrostructureEngine()
+    _state["micro_engine"] = micro_engine
+    _state["equity_curve"] = []
+
+    init_nav = float(acct.get("portfolio_value", acct.get("equity", 0))) if acct else 0
+    init_cash = float(acct.get("cash", 0)) if acct else 0
+    cap = settings.crypto.max_capital
+    cap_label = f"${init_nav:,.2f} (whole account)" if cap <= 0 else f"${cap:,.0f} cap / ${init_nav:,.2f} acct"
 
     _state["portfolio"] = {
         "nav": init_nav,
-        "cash": float(acct.get("cash", init_nav)) if exchange.is_authenticated and acct else 0,
+        "cash": init_cash,
         "total_exposure_pct": 0,
         "unrealized_pnl": 0,
         "drawdown_pct": 0,

@@ -74,6 +74,18 @@ def williams_r(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int
     return wr
 
 
+def keltner_channel(
+    highs: pd.Series, lows: pd.Series, closes: pd.Series,
+    ema_period: int = 20, atr_period: int = 14, multiplier: float = 2.0,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Upper, middle (EMA), lower Keltner Channel."""
+    middle = closes.ewm(span=ema_period, adjust=False).mean()
+    atr_val = atr(highs, lows, closes, atr_period)
+    upper = middle + multiplier * atr_val
+    lower = middle - multiplier * atr_val
+    return upper, middle, lower
+
+
 def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
@@ -110,6 +122,16 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
     mom_5 = closes.pct_change(5)
     mom_10 = closes.pct_change(10)
 
+    kc_u, kc_m, kc_l = keltner_channel(highs, lows, closes)
+    ema_8 = ema(closes, 8)
+    ema_13 = ema(closes, 13)
+    ema_34 = ema(closes, 34)
+    ema_55 = ema(closes, 55)
+    mom_20 = closes.pct_change(20)
+    vol_mom = volumes.pct_change(5)
+
+    atr_sma_20 = atr_val.rolling(window=20).mean()
+
     def _last(series: pd.Series) -> float | None:
         val = series.iloc[-1]
         return float(val) if pd.notna(val) else None
@@ -124,12 +146,73 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
         "bb_lower": _last(bb_lo),
         "vwap": _last(vwap_val),
         "atr": _last(atr_val),
+        "atr_sma_20": _last(atr_sma_20),
         "volume_sma": _last(vol_sma_val),
         "close": float(closes.iloc[-1]),
+        "high": float(highs.iloc[-1]),
+        "low": float(lows.iloc[-1]),
         "volume": float(volumes.iloc[-1]),
         "williams_r": _last(wr_val),
+        "ema_8": _last(ema_8),
         "ema_9": _last(ema_9),
+        "ema_13": _last(ema_13),
         "ema_21": _last(ema_21),
+        "ema_34": _last(ema_34),
+        "ema_55": _last(ema_55),
         "momentum_5": _last(mom_5),
         "momentum_10": _last(mom_10),
+        "momentum_20": _last(mom_20),
+        "volume_momentum": _last(vol_mom),
+        "kc_upper": _last(kc_u),
+        "kc_middle": _last(kc_m),
+        "kc_lower": _last(kc_l),
+    }
+
+
+def compute_confluence(
+    tf_indicators: dict[str, dict[str, float | None]],
+) -> dict[str, float]:
+    """Score multi-timeframe signal alignment.
+
+    tf_indicators: {"1m": indicators, "15m": indicators, "1h": indicators}
+    Returns confluence multiplier and per-tf direction.
+    """
+    directions: dict[str, int] = {}
+    for tf, ind in tf_indicators.items():
+        if not ind or ind.get("ema_9") is None:
+            continue
+        score = 0
+        if (ind.get("ema_9") or 0) > (ind.get("ema_21") or 0):
+            score += 1
+        else:
+            score -= 1
+        if (ind.get("macd_hist") or 0) > 0:
+            score += 1
+        else:
+            score -= 1
+        if (ind.get("rsi") or 50) < 30:
+            score += 1
+        elif (ind.get("rsi") or 50) > 70:
+            score -= 1
+        directions[tf] = 1 if score > 0 else (-1 if score < 0 else 0)
+
+    if not directions:
+        return {"multiplier": 0.5, "alignment": 0}
+
+    vals = list(directions.values())
+    if all(v > 0 for v in vals):
+        alignment = 1.0
+    elif all(v < 0 for v in vals):
+        alignment = -1.0
+    elif len(set(v for v in vals if v != 0)) <= 1:
+        alignment = 0.6 * (1 if sum(vals) > 0 else -1)
+    else:
+        alignment = 0.0
+
+    multiplier = abs(alignment) if alignment != 0 else 0.3
+
+    return {
+        "multiplier": round(multiplier, 2),
+        "alignment": round(alignment, 2),
+        "directions": directions,
     }

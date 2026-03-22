@@ -1,4 +1,6 @@
-"""Lightweight backtester — runs strategies on historical bars and scores them."""
+"""Walk-forward backtester with transaction costs, slippage, multi-position support,
+and per-regime strategy performance tracking.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import redis.asyncio as aioredis
 import structlog
 
 from engine.indicators import compute_all
+from engine.regime import Regime, detect_regime
 from engine.strategies import ALL_STRATEGIES
 
 logger = structlog.get_logger(__name__)
@@ -17,15 +20,28 @@ logger = structlog.get_logger(__name__)
 BACKTEST_CACHE_KEY = "crypto:backtest:results"
 BACKTEST_TTL = 3600
 
+TAKER_FEE_BPS = 60
+SLIPPAGE_BPS = 10
+
+
+def _fee_and_slippage(price: float) -> float:
+    return price * (TAKER_FEE_BPS + SLIPPAGE_BPS) / 10000
+
 
 @dataclass
 class TradeRecord:
+    pair: str
+    strategy: str
     entry_price: float
     entry_bar: int
+    direction: int = 1
     exit_price: float = 0
     exit_bar: int = 0
     pnl_pct: float = 0
+    pnl_usd: float = 0
     closed: bool = False
+    regime_at_entry: str = ""
+    notional: float = 1000
 
 
 @dataclass
@@ -40,6 +56,7 @@ class StrategyResult:
     win_rate: float = 0
     sharpe: float = 0.0
     weight: float = 0.25
+    per_regime: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -53,71 +70,110 @@ class StrategyResult:
             "win_rate": round(self.win_rate, 3),
             "sharpe": round(self.sharpe, 3),
             "weight": round(self.weight, 3),
+            "per_regime": self.per_regime,
         }
+
+
+def _compute_regime_from_bars(bars: list[dict], index: int) -> str:
+    if index < 72:
+        return "volatile"
+    hourly_closes = [b["close"] for b in bars[max(0, index - 168):index + 1]]
+    state = detect_regime(hourly_closes)
+    return state.regime.value
 
 
 def backtest_strategy(
     name: str,
     strategy_fn,
     bars: list[dict],
+    pair: str = "UNKNOWN",
     min_bars: int = 30,
+    allow_concurrent: bool = True,
 ) -> StrategyResult:
-    """Walk-forward backtest a single strategy on historical bars.
-
-    Simulates buy/sell decisions bar-by-bar. Holds one position at a time.
-    Exits after 10 bars max (aggressive scalp horizon).
-    """
+    """Walk-forward backtest with transaction costs, slippage, and multi-position support."""
     result = StrategyResult(name=name)
     if len(bars) < min_bars + 10:
         return result
 
     trades: list[TradeRecord] = []
-    position: TradeRecord | None = None
+    open_positions: list[TradeRecord] = []
     equity_curve: list[float] = [0.0]
     pnl_per_trade: list[float] = []
+    regime_trades: dict[str, list[float]] = {}
 
-    MAX_HOLD_BARS = 15
+    MAX_HOLD_BARS = 20
+    MAX_CONCURRENT = 3 if allow_concurrent else 1
+    STOP_LOSS_PCT = -0.03
+    TAKE_PROFIT_PCT = 0.05
 
     for i in range(min_bars, len(bars)):
         window = bars[max(0, i - 120):i + 1]
         indicators = compute_all(window)
         sig = strategy_fn(window, indicators)
-
         current_price = bars[i]["close"]
 
-        if position and not position.closed:
-            bars_held = i - position.entry_bar
-            unrealized = (current_price - position.entry_price) / position.entry_price
+        closed_this_bar = []
+        for pos in open_positions:
+            if pos.closed:
+                continue
+            bars_held = i - pos.entry_bar
+            gross_return = (current_price - pos.entry_price) / pos.entry_price * pos.direction
+            entry_cost = _fee_and_slippage(pos.entry_price)
+            exit_cost = _fee_and_slippage(current_price)
+            net_return = gross_return - (entry_cost + exit_cost) / pos.entry_price
 
             should_exit = (
-                sig["signal"] == "sell"
+                (sig["signal"] == "sell" and pos.direction == 1)
+                or (sig["signal"] == "buy" and pos.direction == -1)
                 or bars_held >= MAX_HOLD_BARS
-                or unrealized <= -0.03  # 3% stop loss
-                or unrealized >= 0.05   # 5% take profit
+                or net_return <= STOP_LOSS_PCT
+                or net_return >= TAKE_PROFIT_PCT
             )
 
             if should_exit:
-                position.exit_price = current_price
-                position.exit_bar = i
-                position.pnl_pct = unrealized * 100
-                position.closed = True
-                trades.append(position)
-                pnl_per_trade.append(position.pnl_pct)
-                position = None
+                pos.exit_price = current_price
+                pos.exit_bar = i
+                pos.pnl_pct = net_return * 100
+                pos.pnl_usd = pos.notional * net_return
+                pos.closed = True
+                trades.append(pos)
+                pnl_per_trade.append(pos.pnl_pct)
+                closed_this_bar.append(pos)
 
-        elif position is None and sig["signal"] == "buy" and sig["confidence"] > 0.3:
-            position = TradeRecord(entry_price=current_price, entry_bar=i)
+                regime_key = pos.regime_at_entry
+                if regime_key not in regime_trades:
+                    regime_trades[regime_key] = []
+                regime_trades[regime_key].append(pos.pnl_pct)
+
+        open_positions = [p for p in open_positions if not p.closed]
+
+        if len(open_positions) < MAX_CONCURRENT:
+            if sig["signal"] == "buy" and sig.get("confidence", 0) > 0.3:
+                regime = _compute_regime_from_bars(bars, i) if i >= 72 else "volatile"
+                open_positions.append(TradeRecord(
+                    pair=pair, strategy=name, entry_price=current_price,
+                    entry_bar=i, direction=1, regime_at_entry=regime,
+                ))
+            elif sig["signal"] == "sell" and sig.get("confidence", 0) > 0.3:
+                regime = _compute_regime_from_bars(bars, i) if i >= 72 else "volatile"
+                open_positions.append(TradeRecord(
+                    pair=pair, strategy=name, entry_price=current_price,
+                    entry_bar=i, direction=-1, regime_at_entry=regime,
+                ))
 
         cum_pnl = sum(pnl_per_trade)
         equity_curve.append(cum_pnl)
 
-    if position and not position.closed:
-        position.exit_price = bars[-1]["close"]
-        position.exit_bar = len(bars) - 1
-        position.pnl_pct = (position.exit_price - position.entry_price) / position.entry_price * 100
-        position.closed = True
-        trades.append(position)
-        pnl_per_trade.append(position.pnl_pct)
+    for pos in open_positions:
+        if not pos.closed:
+            pos.exit_price = bars[-1]["close"]
+            pos.exit_bar = len(bars) - 1
+            gross = (pos.exit_price - pos.entry_price) / pos.entry_price * pos.direction
+            costs = (_fee_and_slippage(pos.entry_price) + _fee_and_slippage(pos.exit_price)) / pos.entry_price
+            pos.pnl_pct = (gross - costs) * 100
+            pos.closed = True
+            trades.append(pos)
+            pnl_per_trade.append(pos.pnl_pct)
 
     result.total_trades = len(trades)
     result.wins = sum(1 for t in trades if t.pnl_pct > 0)
@@ -143,24 +199,27 @@ def backtest_strategy(
         std_r = var_r ** 0.5
         result.sharpe = mean_r / std_r if std_r > 0 else 0
 
+    for regime, pnls in regime_trades.items():
+        wins = sum(1 for p in pnls if p > 0)
+        result.per_regime[regime] = {
+            "trades": len(pnls),
+            "wins": wins,
+            "win_rate": round(wins / max(len(pnls), 1), 3),
+            "avg_pnl": round(sum(pnls) / max(len(pnls), 1), 3),
+        }
+
     return result
 
 
-def backtest_all(bars: list[dict]) -> list[StrategyResult]:
-    """Backtest every registered strategy and return sorted results."""
+def backtest_all(bars: list[dict], pair: str = "UNKNOWN") -> list[StrategyResult]:
     results = []
     for name, fn in ALL_STRATEGIES.items():
-        res = backtest_strategy(name, fn, bars)
+        res = backtest_strategy(name, fn, bars, pair=pair)
         results.append(res)
     return sorted(results, key=lambda r: r.sharpe, reverse=True)
 
 
 def compute_strategy_weights(results: list[StrategyResult]) -> dict[str, float]:
-    """Compute normalized weights based on Sharpe ratio (positive only).
-
-    Returns a dict mapping strategy name to weight (0-1, summing to 1).
-    Strategies with negative Sharpe get minimum weight.
-    """
     MIN_WEIGHT = 0.05
     sharpes = {r.name: max(r.sharpe, 0) for r in results}
 
@@ -183,10 +242,6 @@ async def run_backtest_cycle(
     get_bars_fn,
     redis_conn: aioredis.Redis,
 ) -> dict[str, Any]:
-    """Run backtests for all strategies across all pairs, cache results to Redis.
-
-    Returns the aggregated strategy weights and per-pair/per-strategy results.
-    """
     import asyncio
 
     all_pair_results: dict[str, list[dict]] = {}
@@ -198,7 +253,7 @@ async def run_backtest_cycle(
             if len(bars) < 60:
                 continue
 
-            pair_results = await asyncio.to_thread(backtest_all, bars)
+            pair_results = await asyncio.to_thread(backtest_all, bars, pair)
             all_pair_results[pair] = [r.to_dict() for r in pair_results]
 
             for r in pair_results:
@@ -215,7 +270,7 @@ async def run_backtest_cycle(
 
     weights = compute_strategy_weights(avg_results)
     for r in avg_results:
-        r.weight = weights.get(r.name, 0.25)
+        r.weight = weights.get(r.name, 0.125)
 
     output = {
         "strategy_weights": weights,

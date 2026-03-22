@@ -21,6 +21,10 @@ coinbase-advanced-py>=1.8
 # Technical Analysis
 numpy>=1.26
 pandas>=2.2
+hmmlearn>=0.3
+
+# WebSocket
+websockets>=13.0
 
 # Telegram
 python-telegram-bot>=21.0

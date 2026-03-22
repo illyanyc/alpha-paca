@@ -1,16 +1,11 @@
-"""Rich terminal UI for Alpha-Paca Crypto — live prices, portfolio, signals, charts."""
+"""Rich terminal UI for Alpha-Paca Crypto — Bloomberg Terminal-style with regime, strategies, agent thinking."""
 
 from __future__ import annotations
 
-import json
-import math
 from datetime import datetime, timezone
 
-from rich.align import Align
 from rich.columns import Columns
 from rich.console import Console, Group
-from rich.layout import Layout
-from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -22,9 +17,15 @@ BULL_COLOR = "green"
 BEAR_COLOR = "red"
 NEUTRAL_COLOR = "yellow"
 
+REGIME_STYLES = {
+    "trending_up": ("bold green", "TREND-UP ↑"),
+    "trending_down": ("bold red", "TREND-DOWN ↓"),
+    "mean_reverting": ("bold blue", "MEAN-REVERT ↔"),
+    "volatile": ("bold yellow", "VOLATILE ⚡"),
+}
+
 
 def _spark_line(values: list[float], width: int = 30) -> str:
-    """Generate a sparkline string from a list of values."""
     if not values:
         return ""
     mn, mx = min(values), max(values)
@@ -43,79 +44,66 @@ def _pnl_color(val: float) -> str:
 
 def _signal_style(signal: str) -> str:
     s = signal.lower()
-    if "strong_buy" in s:
-        return "bold green"
-    if "buy" in s:
+    if "strong_buy" in s or "buy" in s:
         return "green"
-    if "strong_sell" in s:
-        return "bold red"
-    if "sell" in s:
+    if "strong_sell" in s or "sell" in s:
         return "red"
     return "yellow"
 
 
-def build_header(mode: str = "PAPER", uptime_sec: int = 0) -> Panel:
+def _bar(value: float, max_val: float, width: int = 20, char: str = "█") -> str:
+    if max_val <= 0:
+        return ""
+    filled = int(abs(value) / max_val * width)
+    return char * min(filled, width)
+
+
+def build_header(mode: str = "LIVE", uptime_sec: int = 0, regime: dict | None = None,
+                 exchange_status: str = "checking", onchain: dict | None = None) -> Panel:
     hrs = uptime_sec // 3600
     mins = (uptime_sec % 3600) // 60
     secs = uptime_sec % 60
-    mode_style = "bold green" if mode == "PAPER" else "bold red"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
     header = Text()
-    header.append("  ╔═══════════════════════════════════════════════════╗\n", style="cyan")
-    header.append("  ║  ", style="cyan")
-    header.append("🦙 ALPHA-PACA CRYPTO", style="bold white")
-    header.append("  ║\n", style="cyan")
-    header.append("  ╚═══════════════════════════════════════════════════╝\n", style="cyan")
-    header.append(f"  Mode: ", style="dim")
-    header.append(f"{mode}", style=mode_style)
-    header.append(f"  │  Uptime: {hrs:02d}:{mins:02d}:{secs:02d}", style="dim")
+    header.append("  ALPHA-PACA ", style="bold bright_yellow")
+    header.append("│ ", style="dim")
+
+    if mode == "LIVE":
+        header.append("LIVE", style="bold red")
+    else:
+        header.append(mode, style="bold green")
+
+    header.append(f"  │  Up: {hrs:02d}:{mins:02d}:{secs:02d}", style="dim")
     header.append(f"  │  {now}", style="dim")
-    return Panel(header, border_style="cyan", padding=(0, 1))
 
+    if exchange_status == "connected":
+        header.append("  │  ", style="dim")
+        header.append("● CB", style="bold green")
+    elif exchange_status == "unauthorized":
+        header.append("  │  ", style="dim")
+        header.append("● CB AUTH FAIL", style="bold red")
+    elif exchange_status == "market_only":
+        header.append("  │  ", style="dim")
+        header.append("● MKT ONLY", style="bold yellow")
 
-def build_prices_table(prices: dict[str, dict], price_history: dict[str, list[float]] | None = None) -> Panel:
-    table = Table(
-        title="💰 LIVE PRICES",
-        title_style="bold cyan",
-        border_style="blue",
-        show_header=True,
-        header_style="bold white",
-        padding=(0, 1),
-        expand=True,
-    )
-    table.add_column("Pair", style="bold white", min_width=10)
-    table.add_column("Bid", justify="right", style="dim")
-    table.add_column("Ask", justify="right", style="dim")
-    table.add_column("Mid", justify="right", style="bold")
-    table.add_column("Spread", justify="right")
-    table.add_column("Chart (30 ticks)", min_width=32)
+    if regime:
+        r_name = regime.get("regime", "volatile")
+        r_conf = regime.get("confidence", 0)
+        style, label = REGIME_STYLES.get(r_name, ("bold yellow", r_name.upper()))
+        header.append("  │  ", style="dim")
+        header.append(f"[{label}]", style=style)
+        header.append(f" {r_conf:.0%}", style="dim")
 
-    for pair, data in sorted(prices.items()):
-        bid = data.get("bid", 0)
-        ask = data.get("ask", 0)
-        mid = data.get("mid", 0)
-        spread_bps = ((ask - bid) / mid * 10000) if mid > 0 else 0
+    if onchain and onchain.get("fear_greed_index"):
+        fg = onchain["fear_greed_index"]
+        fg_label = onchain.get("fear_greed_label", "")
+        fg_style = "red" if fg < 25 else "yellow" if fg < 45 else "dim" if fg < 55 else "green" if fg < 75 else "red"
+        header.append(f"  │  F&G: ", style="dim")
+        header.append(f"{fg}", style=fg_style)
+        header.append(f" {fg_label}", style="dim")
 
-        history = (price_history or {}).get(pair, [])
-        spark = _spark_line(history, width=30) if history else "—"
-
-        if mid >= 1000:
-            fmt = f"${mid:,.2f}"
-            bid_fmt = f"${bid:,.2f}"
-            ask_fmt = f"${ask:,.2f}"
-        elif mid >= 1:
-            fmt = f"${mid:,.4f}"
-            bid_fmt = f"${bid:,.4f}"
-            ask_fmt = f"${ask:,.4f}"
-        else:
-            fmt = f"${mid:,.6f}"
-            bid_fmt = f"${bid:,.6f}"
-            ask_fmt = f"${ask:,.6f}"
-
-        spread_style = "green" if spread_bps < 20 else "yellow" if spread_bps < 50 else "red"
-        table.add_row(pair, bid_fmt, ask_fmt, fmt, f"[{spread_style}]{spread_bps:.1f}bps[/]", spark)
-
-    return Panel(table, border_style="blue")
+    return Panel(header, border_style="bright_yellow", padding=(0, 0))
 
 
 def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
@@ -125,12 +113,9 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
     unrealized = portfolio.get("unrealized_pnl", 0)
     drawdown = portfolio.get("drawdown_pct", 0)
     realized = portfolio.get("realized_pnl_today", 0)
-
     total_pnl = portfolio.get("total_realized_pnl", 0)
     total_trades = portfolio.get("total_trades", 0)
     total_wr = portfolio.get("total_win_rate", 0)
-    daily_trades = portfolio.get("daily_trades", 0)
-    daily_wr = portfolio.get("daily_win_rate", 0)
 
     grid = Table.grid(padding=(0, 2), expand=True)
     for _ in range(8):
@@ -139,29 +124,26 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
     grid.add_row(
         f"[bold]NAV[/]\n[white]${nav:,.2f}[/]",
         f"[bold]Cash[/]\n[white]${cash:,.2f}[/]",
-        f"[bold]Exposure[/]\n[{'green' if exposure < 70 else 'yellow' if exposure < 90 else 'red'}]{exposure:.1f}%[/]",
-        f"[bold]Unrealized[/]\n[{_pnl_color(unrealized)}]${unrealized:+,.2f}[/]",
+        f"[bold]Expo[/]\n[{'green' if exposure < 70 else 'yellow' if exposure < 90 else 'red'}]{exposure:.1f}%[/]",
+        f"[bold]Unreal[/]\n[{_pnl_color(unrealized)}]${unrealized:+,.2f}[/]",
         f"[bold]Day P&L[/]\n[{_pnl_color(realized)}]${realized:+,.2f}[/]",
-        f"[bold]Total P&L[/]\n[{_pnl_color(total_pnl)}]${total_pnl:+,.2f}[/]",
-        f"[bold]Win Rate[/]\n[{'green' if total_wr >= 50 else 'red'}]{total_wr:.0f}% ({total_trades})[/]",
-        f"[bold]Drawdown[/]\n[{'green' if drawdown < 5 else 'yellow' if drawdown < 10 else 'red'}]{drawdown:.1f}%[/]",
+        f"[bold]Total[/]\n[{_pnl_color(total_pnl)}]${total_pnl:+,.2f}[/]",
+        f"[bold]WR[/]\n[{'green' if total_wr >= 50 else 'red'}]{total_wr:.0f}%({total_trades})[/]",
+        f"[bold]DD[/]\n[{'green' if drawdown < 5 else 'yellow' if drawdown < 10 else 'red'}]{drawdown:.1f}%[/]",
     )
 
     content = Group(grid)
 
     if positions:
-        pos_table = Table(
-            border_style="dim", show_header=True, header_style="bold",
-            padding=(0, 1), expand=True,
-        )
-        pos_table.add_column("Pair", style="bold")
+        pos_table = Table(border_style="dim", show_header=True, header_style="bold", padding=(0, 1), expand=True)
+        pos_table.add_column("Asset", style="bold")
         pos_table.add_column("Side", justify="center")
         pos_table.add_column("Qty", justify="right")
         pos_table.add_column("Entry", justify="right")
         pos_table.add_column("Current", justify="right")
-        pos_table.add_column("P&L", justify="right")
-        pos_table.add_column("P&L %", justify="right")
         pos_table.add_column("Value", justify="right")
+        pos_table.add_column("P&L", justify="right")
+        pos_table.add_column("Alloc%", justify="right")
 
         for p in positions:
             pair = p.get("pair", p.get("symbol", "?"))
@@ -175,114 +157,168 @@ def build_portfolio_panel(portfolio: dict, positions: list[dict]) -> Panel:
             if pnl_pct == 0 and entry > 0 and qty > 0:
                 pnl_pct = (pnl / (entry * qty) * 100)
             mv = p.get("market_value", p.get("market_value_usd", qty * current))
+            alloc = (mv / nav * 100) if nav > 0 else 0
 
             pos_table.add_row(
-                pair,
-                f"[{side_style}]{side}[/]",
-                f"{qty:.6f}",
-                f"${entry:,.2f}",
-                f"${current:,.2f}",
-                f"[{_pnl_color(pnl)}]${pnl:+,.2f}[/]",
-                f"[{_pnl_color(pnl_pct)}]{pnl_pct:+.2f}%[/]",
-                f"${mv:,.2f}",
+                pair, f"[{side_style}]{side}[/]", f"{qty:.6f}",
+                f"${entry:,.2f}", f"${current:,.2f}", f"${mv:,.2f}",
+                f"[{_pnl_color(pnl)}]${pnl:+,.2f} ({pnl_pct:+.1f}%)[/]",
+                f"[bright_yellow]{alloc:.1f}%[/]",
             )
         content = Group(grid, Text(""), pos_table)
-    else:
-        content = Group(grid, Text("\n  No open positions", style="dim italic"))
 
     return Panel(content, title="📊 PORTFOLIO", title_align="left", border_style="magenta")
 
 
+def build_prices_table(prices: dict, price_history: dict | None = None,
+                       microstructure: dict | None = None) -> Panel:
+    table = Table(border_style="blue", show_header=True, header_style="bold white", padding=(0, 1), expand=True)
+    table.add_column("Pair", style="bold white", min_width=10)
+    table.add_column("Mid", justify="right", style="bold")
+    table.add_column("Spread", justify="right")
+    table.add_column("Flow", justify="center")
+    table.add_column("VPIN", justify="right")
+    table.add_column("Chart", min_width=32)
+
+    for pair, data in sorted(prices.items()):
+        mid = data.get("mid", 0)
+        bid = data.get("bid", 0)
+        ask = data.get("ask", 0)
+        spread_bps = ((ask - bid) / mid * 10000) if mid > 0 else 0
+
+        history = (price_history or {}).get(pair, [])
+        spark = _spark_line(history, width=30)
+
+        if mid >= 1000:
+            fmt = f"${mid:,.2f}"
+        elif mid >= 1:
+            fmt = f"${mid:,.4f}"
+        else:
+            fmt = f"${mid:,.6f}"
+
+        spread_style = "green" if spread_bps < 20 else "yellow" if spread_bps < 50 else "red"
+
+        micro = (microstructure or {}).get(pair, {})
+        if hasattr(micro, "signal"):
+            flow_sig = micro.signal
+            vpin_val = micro.vpin
+        else:
+            flow_sig = micro.get("signal", "—") if isinstance(micro, dict) else "—"
+            vpin_val = micro.get("vpin", 0) if isinstance(micro, dict) else 0
+
+        flow_style = _signal_style(flow_sig)
+        vpin_style = "red" if vpin_val > 0.7 else "yellow" if vpin_val > 0.5 else "dim"
+
+        table.add_row(
+            pair, fmt, f"[{spread_style}]{spread_bps:.1f}bps[/]",
+            f"[{flow_style}]{flow_sig}[/]",
+            f"[{vpin_style}]{vpin_val:.2f}[/]",
+            f"[cyan]{spark}[/]" if spark else "—",
+        )
+
+    return Panel(table, title="💰 LIVE PRICES", title_align="left", border_style="blue")
+
+
 def build_signals_panel(tech_signals: dict, fund_signals: dict, news_data: dict) -> Panel:
-    table = Table(
-        border_style="dim", show_header=True, header_style="bold",
-        padding=(0, 1), expand=True,
-    )
+    table = Table(border_style="dim", show_header=True, header_style="bold", padding=(0, 1), expand=True)
     table.add_column("Pair", style="bold white")
-    table.add_column("Technical", justify="center")
-    table.add_column("T.Score", justify="right")
-    table.add_column("Fundamental", justify="center")
-    table.add_column("F.Score", justify="right")
-    table.add_column("Details")
+    table.add_column("Tech", justify="center")
+    table.add_column("Score", justify="right")
+    table.add_column("Fund", justify="center")
+    table.add_column("Score", justify="right")
 
     all_pairs = sorted(set(list(tech_signals.keys()) + list(fund_signals.keys())))
     for pair in all_pairs:
         t = tech_signals.get(pair, {})
         f = fund_signals.get(pair, {})
-        t_sig = t.get("signal", "—")
-        t_score = t.get("score", 0)
-        f_sig = f.get("signal", "—")
-        f_score = f.get("score", 0)
-        details = t.get("details", "")[:40]
-
         table.add_row(
             pair,
-            f"[{_signal_style(t_sig)}]{t_sig}[/]",
-            f"{t_score:+.2f}",
-            f"[{_signal_style(f_sig)}]{f_sig}[/]",
-            f"{f_score:+.2f}",
-            f"[dim]{details}[/]",
+            f"[{_signal_style(t.get('signal', '—'))}]{t.get('signal', '—')}[/]",
+            f"{t.get('score', 0):+.2f}",
+            f"[{_signal_style(f.get('signal', '—'))}]{f.get('signal', '—')}[/]",
+            f"{f.get('score', 0):+.2f}",
         )
 
     news_sentiment = news_data.get("overall_sentiment", "—") if isinstance(news_data, dict) else "—"
     news_score = news_data.get("overall_score", 0) if isinstance(news_data, dict) else 0
-
-    footer = Text(f"\n  📰 News Sentiment: ", style="dim")
+    footer = Text(f"\n  📰 News: ", style="dim")
     footer.append(f"{news_sentiment}", style=_signal_style(news_sentiment))
-    footer.append(f" (score: {news_score:+.2f})", style="dim")
+    footer.append(f" ({news_score:+.2f})", style="dim")
+
+    return Panel(Group(table, footer), title="📡 SIGNALS", title_align="left", border_style="green")
+
+
+def build_strategy_panel(strategy_signals: dict, backtest: dict | None = None) -> Panel:
+    lines: list[Text] = []
+
+    for pair, strats in sorted(strategy_signals.items()):
+        line = Text(f"  {pair}: ", style="bold")
+        if isinstance(strats, list):
+            buys = [s["name"] for s in strats if isinstance(s, dict) and s.get("signal") == "buy"]
+            sells = [s["name"] for s in strats if isinstance(s, dict) and s.get("signal") == "sell"]
+            for b in buys:
+                line.append(f"▲{b} ", style="green")
+            for s in sells:
+                line.append(f"▼{s} ", style="red")
+        elif isinstance(strats, dict):
+            for b in strats.get("buy", []):
+                line.append(f"▲{b} ", style="green")
+            for s in strats.get("sell", []):
+                line.append(f"▼{s} ", style="red")
+        lines.append(line)
+
+    if backtest and backtest.get("aggregate"):
+        lines.append(Text(""))
+        bt_line = Text("  Backtest: ", style="dim")
+        for a in backtest["aggregate"]:
+            s = a.get("sharpe", 0)
+            col = "green" if s > 0.5 else "yellow" if s > 0 else "red"
+            bt_line.append(
+                f"{a['name']}(S={s:.1f},W={a.get('win_rate', 0) * 100:.0f}%,w={a.get('weight', 0) * 100:.0f}%) ",
+                style=col,
+            )
+        lines.append(bt_line)
 
     return Panel(
-        Group(table, footer),
-        title="📡 SIGNALS", title_align="left", border_style="green",
+        Group(*lines) if lines else Text("  Computing strategies...", style="dim"),
+        title="🎯 STRATEGIES", title_align="left", border_style="bright_cyan",
     )
 
 
-def build_trades_panel(recent_trades: list[dict]) -> Panel:
-    if not recent_trades:
-        return Panel(
-            Text("  No trades yet", style="dim italic"),
-            title="📋 RECENT TRADES", title_align="left", border_style="yellow",
-        )
+def build_thinking_panel(agent_log: list[dict]) -> Panel:
+    icons = {
+        "news_scout": "📰", "technical_analyst": "📈", "fundamental_analyst": "🔬",
+        "orchestrator": "🧠", "risk_validator": "🛡️", "order_executor": "⚡",
+    }
+    agent_styles = {
+        "orchestrator": "green", "order_executor": "red", "risk_validator": "bright_yellow",
+        "technical_analyst": "cyan", "fundamental_analyst": "bright_magenta", "news_scout": "yellow",
+    }
 
-    table = Table(
-        border_style="dim", show_header=True, header_style="bold",
-        padding=(0, 1), expand=True,
+    lines: list[Text] = []
+    for entry in agent_log[-20:]:
+        ts = str(entry.get("ts", ""))[11:19]
+        agent = entry.get("agent", "?")
+        step = entry.get("step", "")
+        icon = icons.get(agent, "🤖")
+        style = agent_styles.get(agent, "dim")
+
+        line = Text()
+        line.append(f"{ts} ", style="dim")
+        line.append(f"{icon} {agent.replace('_', ' ')} ", style=f"bold {style}")
+        line.append(step[:80])
+        lines.append(line)
+
+    return Panel(
+        Group(*lines) if lines else Text("  Waiting for agent cycle...", style="dim"),
+        title="🧠 AGENT THINKING", title_align="left", border_style="bright_green",
     )
-    table.add_column("Time", style="dim")
-    table.add_column("Side", justify="center")
-    table.add_column("Pair")
-    table.add_column("Qty", justify="right")
-    table.add_column("Price", justify="right")
-    table.add_column("P&L", justify="right")
-    table.add_column("Reason")
-
-    for t in recent_trades[-8:]:
-        side = t.get("side", "?")
-        side_style = "bold green" if side == "BUY" else "bold red"
-        pnl = t.get("pnl", 0) or 0
-        time_str = str(t.get("opened_at", ""))[:19]
-
-        table.add_row(
-            time_str,
-            f"[{side_style}]{side}[/]",
-            t.get("pair", "?"),
-            f"{t.get('qty', 0):.6f}",
-            f"${t.get('entry_price', t.get('price', 0)):,.2f}",
-            f"[{_pnl_color(pnl)}]${pnl:+,.2f}[/]",
-            f"[dim]{(t.get('reasoning', '') or '')[:30]}[/]",
-        )
-
-    return Panel(table, title="📋 RECENT TRADES", title_align="left", border_style="yellow")
 
 
 def build_agent_status(agent_statuses: dict[str, str]) -> Panel:
     icons = {
-        "news_scout": "📰",
-        "technical_analyst": "📈",
-        "fundamental_analyst": "🔬",
-        "orchestrator": "🧠",
-        "risk_validator": "🛡️",
-        "order_executor": "⚡",
+        "news_scout": "📰", "technical_analyst": "📈", "fundamental_analyst": "🔬",
+        "orchestrator": "🧠", "risk_validator": "🛡️", "order_executor": "⚡",
     }
     status_icons = {
         "healthy": "🟢", "running": "🔵", "idle": "⚪", "standby": "🟣",
@@ -298,8 +334,6 @@ def build_agent_status(agent_statuses: dict[str, str]) -> Panel:
             style = "bold red"
         elif status == "healing":
             style = "bold yellow"
-        elif status == "circuit_open":
-            style = "bold bright_red"
         parts.append(f" {icon} {agent}: {s_icon} [{style}]{status}[/]" if style else f" {icon} {agent}: {s_icon} {status}")
 
     return Panel(
@@ -308,51 +342,54 @@ def build_agent_status(agent_statuses: dict[str, str]) -> Panel:
     )
 
 
+def build_trades_panel(recent_trades: list[dict]) -> Panel:
+    if not recent_trades:
+        return Panel(Text("  No trades yet", style="dim italic"), title="📋 TRADES", title_align="left", border_style="yellow")
+
+    table = Table(border_style="dim", show_header=True, header_style="bold", padding=(0, 1), expand=True)
+    table.add_column("Time", style="dim")
+    table.add_column("Side", justify="center")
+    table.add_column("Pair")
+    table.add_column("Price", justify="right")
+    table.add_column("P&L", justify="right")
+
+    for t in recent_trades[-10:]:
+        side = t.get("side", "?")
+        side_style = "bold green" if side == "BUY" else "bold red"
+        pnl = t.get("pnl", 0) or 0
+        time_str = str(t.get("opened_at", ""))[:19]
+        table.add_row(
+            time_str, f"[{side_style}]{side}[/]", t.get("pair", "?"),
+            f"${t.get('entry_price', t.get('price', 0)):,.2f}",
+            f"[{_pnl_color(pnl)}]${pnl:+,.2f}[/]",
+        )
+
+    return Panel(table, title="📋 TRADES", title_align="left", border_style="yellow")
+
+
 def build_healing_panel(healing_events: list[dict]) -> Panel | None:
-    """Build a panel showing recent self-healing activity."""
     if not healing_events:
         return None
 
-    severity_style = {
-        "critical": "bold red",
-        "warning": "yellow",
-        "transient": "cyan",
-        "info": "green",
-    }
-
-    outcome_icons = {
-        "healed": "✅",
-        "retrying": "🔄",
-        "circuit_open": "🔶",
-        "skipped": "⏭️",
-        "retry_failed": "❌",
-    }
-
-    table = Table(
-        border_style="dim", show_header=True, header_style="bold",
-        padding=(0, 1), expand=True,
-    )
+    table = Table(border_style="dim", show_header=True, header_style="bold", padding=(0, 1), expand=True)
     table.add_column("Time", style="dim", max_width=8)
     table.add_column("Agent", max_width=14)
     table.add_column("", max_width=3)
     table.add_column("Event", ratio=1)
 
+    outcome_icons = {"healed": "✅", "retrying": "🔄", "circuit_open": "🔶", "skipped": "⏭️", "retry_failed": "❌"}
+    severity_style = {"critical": "bold red", "warning": "yellow", "transient": "cyan", "info": "green"}
+
     for evt in healing_events[-6:]:
         ts = str(evt.get("timestamp", ""))
         time_str = ts[11:19] if len(ts) > 19 else ts[:8]
-        agent = evt.get("agent", "?")
-        severity = evt.get("severity", "info")
-        outcome = evt.get("outcome", "")
-        message = evt.get("message", "")[:50]
-        o_icon = outcome_icons.get(outcome, "")
-        s_style = severity_style.get(severity, "dim")
+        table.add_row(
+            time_str, evt.get("agent", "?"),
+            outcome_icons.get(evt.get("outcome", ""), ""),
+            f"[{severity_style.get(evt.get('severity', 'info'), 'dim')}]{evt.get('message', '')[:50]}[/]",
+        )
 
-        table.add_row(time_str, agent, o_icon, f"[{s_style}]{message}[/]")
-
-    return Panel(
-        table,
-        title="🩺 SELF-HEALING", title_align="left", border_style="bright_yellow",
-    )
+    return Panel(table, title="🩺 SELF-HEALING", title_align="left", border_style="bright_yellow")
 
 
 def build_full_display(
@@ -366,20 +403,38 @@ def build_full_display(
     agent_statuses: dict,
     price_history: dict | None = None,
     healing_events: list | None = None,
-    mode: str = "PAPER",
+    mode: str = "LIVE",
     uptime_sec: int = 0,
+    regime: dict | None = None,
+    exchange_status: str = "checking",
+    onchain: dict | None = None,
+    microstructure: dict | None = None,
+    strategy_signals: dict | None = None,
+    backtest: dict | None = None,
+    agent_log: list | None = None,
 ) -> Group:
-    """Build the complete terminal display."""
+    """Build the complete Bloomberg-style terminal display."""
     parts = [
-        build_header(mode, uptime_sec),
-        build_prices_table(prices, price_history),
+        build_header(mode, uptime_sec, regime, exchange_status, onchain),
         build_portfolio_panel(portfolio, positions),
-        build_signals_panel(tech_signals, fund_signals, news_data),
-        Columns([
-            build_trades_panel(recent_trades),
-            build_agent_status(agent_statuses),
-        ], expand=True, equal=True),
     ]
+
+    col_left = Group(
+        build_prices_table(prices, price_history, microstructure),
+        build_signals_panel(tech_signals, fund_signals, news_data),
+    )
+
+    col_right = Group(
+        build_strategy_panel(strategy_signals or {}, backtest),
+        build_thinking_panel(agent_log or []),
+    )
+
+    parts.append(Columns([col_left, col_right], expand=True, equal=True))
+
+    parts.append(Columns([
+        build_trades_panel(recent_trades),
+        build_agent_status(agent_statuses),
+    ], expand=True, equal=True))
 
     healing_panel = build_healing_panel(healing_events or [])
     if healing_panel:

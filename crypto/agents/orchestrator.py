@@ -21,6 +21,9 @@ FUND_SIGNAL_KEY = "crypto:signals:fundamental"
 NEWS_CACHE_KEY = "crypto:news:sentiment"
 BACKTEST_KEY = "crypto:backtest:results"
 STRATEGY_SIGNALS_KEY = "crypto:signals:strategies"
+REGIME_KEY = "crypto:regime"
+MICRO_KEY = "crypto:microstructure"
+ONCHAIN_KEY = "crypto:onchain"
 
 
 class TradeDecision(BaseModel):
@@ -54,38 +57,43 @@ class OrchestratorAgent(BaseAgent):
         self._agent = Agent(
             "anthropic:claude-sonnet-4-20250514",
             instructions=(
-                "You are an AGGRESSIVE crypto portfolio manager on Coinbase SPOT.\n\n"
-                "You receive technical, fundamental, news, and strategy signals for each pair. "
-                "Decide BUY / SELL / HOLD with position sizing.\n\n"
+                "You are an AGGRESSIVE institutional-grade crypto portfolio manager on Coinbase SPOT.\n\n"
+                "You receive 6 signal sources: technical, fundamental, news, strategies, "
+                "microstructure (order flow), and on-chain (funding rates, Fear/Greed). "
+                "You also receive the current REGIME state (trending-up, trending-down, "
+                "mean-reverting, volatile).\n\n"
+                "Decide BUY / SELL / HOLD. Position sizing is handled automatically — "
+                "you only provide confidence (0-1) and the sizer handles qty/risk.\n\n"
                 "## ACTIONS (spot — long only)\n"
-                "- **BUY** = Open or add to a LONG position (profit when price rises)\n"
-                "- **SELL** = Close/exit an existing LONG position back to USD\n"
+                "- **BUY** = Open or add to a LONG position\n"
+                "- **SELL** = Close/exit an existing LONG position to USD\n"
                 "- **HOLD** = No change\n\n"
-                "IMPORTANT: This is SPOT trading — no short selling. "
-                "In bearish conditions, SELL existing positions to go to cash. "
-                "Cash IS a valid position in a bear market.\n\n"
-                "## WHEN TO BUY (go long)\n"
+                "IMPORTANT: SPOT trading — no short selling. "
+                "In bearish conditions, SELL to go to cash.\n\n"
+                "## REGIME-ADAPTIVE RULES\n"
+                "- **TRENDING-UP**: BUY aggressively, favor momentum/trend strategies\n"
+                "- **TRENDING-DOWN**: SELL positions, stay in cash, no new longs\n"
+                "- **MEAN-REVERTING**: BUY oversold dips, SELL at resistance — favor z-score/VWAP strategies\n"
+                "- **VOLATILE**: Trade carefully, tighter stops, favor breakout/liquidity grab strategies\n\n"
+                "## SIGNAL HIERARCHY\n"
                 f"- Confidence threshold: {self._confidence_threshold}\n"
-                "- 2+ signal sources bullish → BUY.\n"
-                "- All sources agree bullish → confidence >= 0.8, size 15-25%.\n"
-                "- 2 sources agree → confidence >= 0.6, size 5-15%.\n"
-                "- When macro is neutral-to-bullish, deploy capital in the strongest pairs.\n"
-                "- BUY aggressively on dips when signals show mean reversion opportunity.\n\n"
-                "## WHEN TO SELL (close long / go to cash)\n"
-                "- You hold a LONG position AND:\n"
-                "  * Tech is SELL/STRONG_SELL, or 2+ sources turn bearish\n"
-                "  * Unrealized PnL worse than -3% (stop-loss) or better than +8% with weakening signals\n"
-                "- You do NOT hold a position AND signals are bearish → HOLD (stay in cash).\n"
-                "- Be DECISIVE about protecting profits and cutting losses.\n\n"
-                "## STRATEGY\n"
-                "- In BULL markets: BUY aggressively across the strongest pairs.\n"
-                "- In BEAR markets: SELL positions to protect capital, sit in cash, wait for reversal.\n"
-                "- In MIXED markets: be selective — BUY only the best setups, SELL weak holdings.\n"
-                "- When signals are bearish and you have NO position, use HOLD (you're already safe in cash).\n"
-                "- NEVER sit 100% in cash during bullish conditions — deploy capital.\n"
-                "- Check 'Current Positions' to know what you hold.\n"
-                "- Only SELL positions you actually own. Do NOT SELL a pair you don't hold.\n"
-                "- DO NOT default everything to HOLD — that is failure.\n\n"
+                "- Strategy + Technical aligned → high confidence (0.7-0.9)\n"
+                "- Microstructure confirms (order flow) → boost confidence +0.1\n"
+                "- On-chain diverges (extreme funding/greed) → reduce confidence -0.1\n"
+                "- 2+ high-conviction signals conflict → HOLD (conflict)\n"
+                "- Strong buy-flow + technical buy + regime trending-up → max confidence BUY\n\n"
+                "## WHEN TO BUY\n"
+                "- 2+ sources bullish, regime not trending-down\n"
+                "- Confidence >= 0.6. BUY aggressively on mean-reversion dips.\n\n"
+                "## WHEN TO SELL\n"
+                "- Tech SELL + 1 other source confirms\n"
+                "- Unrealized PnL worse than -3% or better than +8% with weakening signals\n"
+                "- Regime shifts to trending-down while holding longs\n\n"
+                "## RULES\n"
+                "- DO NOT default to HOLD — always take a directional view\n"
+                "- Only SELL positions you actually own\n"
+                "- Deploy capital in bull markets — sitting in cash is failure\n"
+                "- size_pct field is advisory only — actual sizing done by Kelly+ATR sizer\n"
                 f"{skill_text}"
             ),
             output_type=OrchestratorOutput,
@@ -102,12 +110,18 @@ class OrchestratorAgent(BaseAgent):
         news_raw = await r.get(NEWS_CACHE_KEY)
         backtest_raw = await r.get(BACKTEST_KEY)
         strat_raw = await r.get(STRATEGY_SIGNALS_KEY)
+        regime_raw = await r.get(REGIME_KEY)
+        micro_raw = await r.get(MICRO_KEY)
+        onchain_raw = await r.get(ONCHAIN_KEY)
 
         tech_signals = json.loads(tech_raw) if tech_raw else {}
         fund_signals = json.loads(fund_raw) if fund_raw else {}
         news_data = json.loads(news_raw) if news_raw else {}
         backtest_data = json.loads(backtest_raw) if backtest_raw else {}
         strategy_signals = json.loads(strat_raw) if strat_raw else {}
+        regime_data = json.loads(regime_raw) if regime_raw else {}
+        micro_data = json.loads(micro_raw) if micro_raw else {}
+        onchain_data = json.loads(onchain_raw) if onchain_raw else {}
 
         positions_raw = kwargs.get("positions", [])
         portfolio_state = kwargs.get("portfolio_state", {})
@@ -136,6 +150,7 @@ class OrchestratorAgent(BaseAgent):
         prompt = self._build_prompt(
             tech_signals, fund_signals, news_data, positions_raw, portfolio_state,
             settings, backtest_data, strategy_signals, learning_summary,
+            regime_data, micro_data, onchain_data,
         )
 
         result = await self._agent.run(prompt)
@@ -182,6 +197,9 @@ class OrchestratorAgent(BaseAgent):
         backtest: dict | None = None,
         strategy_signals: dict | None = None,
         learning: dict | None = None,
+        regime: dict | None = None,
+        microstructure: dict | None = None,
+        onchain: dict | None = None,
     ) -> str:
         nav = portfolio.get("nav", 0) if portfolio else 0
         cap_label = f"${nav:,.2f} (whole account)" if settings.crypto.max_capital <= 0 else f"${settings.crypto.max_capital:,.0f}"
@@ -224,6 +242,40 @@ class OrchestratorAgent(BaseAgent):
             sections.append("\n".join(pos_lines))
         else:
             sections.append("## Current Positions\nNONE — all cash. Look for BUY opportunities or HOLD to stay in cash.")
+
+        if regime:
+            r_label = regime.get("label", "UNKNOWN")
+            r_conf = regime.get("confidence", 0)
+            r_features = regime.get("features", {})
+            sections.append(
+                f"## Market Regime: [{r_label}] (confidence={r_conf:.0%})\n"
+                f"Vol={r_features.get('realized_vol', 0):.2f}, "
+                f"Autocorr={r_features.get('autocorrelation', 0):.3f}, "
+                f"Hurst={r_features.get('hurst_exponent', 0.5):.3f}, "
+                f"Trend={r_features.get('trend_strength', 0):.3f}"
+            )
+
+        if microstructure:
+            micro_lines = ["## Microstructure (Order Flow)"]
+            for pair, data in microstructure.items():
+                if isinstance(data, dict):
+                    micro_lines.append(
+                        f"- {pair}: flow={data.get('signal', '?')} "
+                        f"(imb={data.get('imbalance', 0):.3f}, "
+                        f"flow={data.get('flow', 0):.3f}, "
+                        f"VPIN={data.get('vpin', 0):.3f})"
+                    )
+            if len(micro_lines) > 1:
+                sections.append("\n".join(micro_lines))
+
+        if onchain:
+            oc_lines = [
+                "## On-Chain Signals",
+                f"- Fear/Greed: {onchain.get('fear_greed_index', 50)} ({onchain.get('fear_greed_label', '?')})",
+                f"- BTC Funding: {onchain.get('btc_funding_rate', 0):.4%}",
+                f"- Signal: {onchain.get('signal', 'neutral')} (score={onchain.get('score', 0):.2f})",
+            ]
+            sections.append("\n".join(oc_lines))
 
         if tech:
             tech_lines = ["## Technical Signals"]
