@@ -53,8 +53,8 @@ class CryptoTradingSettings(BaseSettings):
     max_position_pct: float = 30.0
     max_drawdown_pct: float = 10.0
     max_total_exposure_pct: float = 90.0
-    min_trade_interval_sec: int = 300
-    confidence_threshold: float = 0.7
+    min_trade_interval_sec: int = 120
+    confidence_threshold: float = 0.55
     stop_loss_pct: float = 5.0
     take_profit_pct: float = 12.0
 

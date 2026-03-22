@@ -299,14 +299,10 @@ def dynamic_composite(
     final_score = max(-1.0, min(1.0, final_score))
     final_conf = max(0.0, min(1.0, final_conf))
 
-    if final_score > 0.3 and final_conf > 0.5:
+    if final_score > 0.15 and final_conf > 0.4:
         action = "BUY"
-    elif final_score < -0.3 and final_conf > 0.5:
+    elif final_score < -0.15 and final_conf > 0.4:
         action = "SELL"
-    elif final_score > 0.15:
-        action = "LEAN_BUY"
-    elif final_score < -0.15:
-        action = "LEAN_SELL"
     else:
         action = "HOLD"
 

@@ -165,7 +165,7 @@ class RiskValidatorAgent(BaseAgent):
                 nav = float(self._get_nav(positions, settings))
                 group_exposure += (mv / nav * 100) if nav > 0 else 0
 
-        max_group_pct = 60
+        max_group_pct = 75
         new_total = group_exposure + decision.get("size_pct", 0)
         if new_total > max_group_pct:
             return RiskCheckResult(

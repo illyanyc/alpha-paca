@@ -62,7 +62,7 @@ def fractional_kelly(
     win_prob: float,
     avg_win: float,
     avg_loss: float,
-    fraction: float = 0.25,
+    fraction: float = 0.35,
 ) -> float:
     """Fractional Kelly criterion — returns optimal bet fraction (0 to 1)."""
     if avg_loss == 0 or win_prob <= 0 or win_prob >= 1:
@@ -96,7 +96,7 @@ def _regime_scalar(regime: str | None) -> float:
         "trending_up": 1.2,
         "trending_down": 1.1,
         "mean_reverting": 1.0,
-        "volatile": 0.5,
+        "volatile": 0.7,
     }
     return scalars.get(regime, 1.0)
 
@@ -136,13 +136,13 @@ def _anti_martingale_scalar(pair: str) -> float:
     pair_losses = tracker.pair_consecutive_losses(pair)
 
     if global_losses >= 5:
-        return 0.25
+        return 0.4
     elif global_losses >= 3:
-        return 0.5
+        return 0.65
     elif pair_losses >= 3:
-        return 0.5
+        return 0.65
     elif pair_losses >= 2:
-        return 0.7
+        return 0.8
     return 1.0
 
 
@@ -183,7 +183,7 @@ def compute_position_size(
     )
 
     target_pct = min(atr_pct, kelly_est, cap_for_position)
-    target_pct = max(target_pct, 0.005)
+    target_pct = max(target_pct, 0.01)
 
     adjustments: dict[str, float] = {}
 
@@ -203,7 +203,7 @@ def compute_position_size(
     adjustments["anti_martingale"] = am_s
     target_pct *= am_s
 
-    target_pct = max(0.003, min(target_pct, cap_for_position))
+    target_pct = max(0.01, min(target_pct, cap_for_position))
 
     notional = available_capital * target_pct
     qty = notional / price if price > 0 else 0
