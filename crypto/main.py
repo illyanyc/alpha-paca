@@ -330,6 +330,9 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
         "realized_pnl_today": pnl_s.get("daily_realized_pnl", 0),
         "total_realized_pnl": pnl_s.get("total_realized_pnl", 0),
         "total_trades": pnl_s.get("total_trades", 0),
+        "total_win_rate": pnl_s.get("total_win_rate", 0),
+        "daily_trades": pnl_s.get("daily_trades", 0),
+        "daily_win_rate": pnl_s.get("daily_win_rate", 0),
     }
 
 
@@ -846,6 +849,30 @@ async def tick_24h(telegram: TelegramService) -> None:
         await asyncio.sleep(86400)
 
 
+async def tick_reconcile(
+    exchange: CoinbaseCryptoService,
+    redis_conn: aioredis.Redis,
+) -> None:
+    """Reconcile Coinbase fills with local PnL every hour."""
+    await asyncio.sleep(300)
+    while not _shutdown.is_set():
+        try:
+            from services.reconciler import reconcile_pnl
+            from services.settings_store import load_pnl_summary
+            recon = await reconcile_pnl(exchange, redis_conn)
+            if "error" not in recon:
+                pnl = await load_pnl_summary()
+                _state["pnl_summary"] = pnl
+                logger.info(
+                    "hourly_reconciliation",
+                    net_pnl=recon["net_pnl"],
+                    fees=recon["total_fees"],
+                )
+        except Exception as e:
+            logger.warning("tick_reconcile_error", error=str(e))
+        await asyncio.sleep(3600)
+
+
 async def tick_daily_backtest(
     exchange: CoinbaseCryptoService,
     redis_conn: aioredis.Redis,
@@ -1045,6 +1072,23 @@ async def run() -> None:
     day_bot = DaySniperAgent()
     executor = OrderExecutorAgent(exchange, telegram)
 
+    # Reconcile PnL from Coinbase fills on startup
+    if exchange.is_authenticated:
+        try:
+            from services.reconciler import reconcile_pnl
+            recon = await reconcile_pnl(exchange, redis_conn)
+            if "error" not in recon:
+                pnl = await load_pnl_summary()
+                _state["pnl_summary"] = pnl
+                logger.info(
+                    "startup_reconciliation_done",
+                    net_pnl=recon["net_pnl"],
+                    fees=recon["total_fees"],
+                    fills=recon.get("total_trades", 0),
+                )
+        except Exception as e:
+            logger.warning("startup_reconciliation_failed", error=str(e))
+
     _state["equity_curve"] = []
 
     init_nav = float(acct.get("portfolio_value", acct.get("equity", 0))) if acct else 0
@@ -1101,6 +1145,7 @@ async def run() -> None:
             "tick_1h": lambda: tick_1h(telegram, exchange),
             "tick_24h": lambda: tick_24h(telegram),
             "daily_backtest": lambda: tick_daily_backtest(exchange, redis_conn, telegram),
+            "reconcile": lambda: tick_reconcile(exchange, redis_conn),
             "web": lambda: _safe_web_serve(),
         }
         if is_tty and live_ctx:

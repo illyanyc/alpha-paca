@@ -88,8 +88,16 @@ class OrderExecutorAgent(BaseAgent):
             self.think(f"[{bot_id}] Order submitted {pair} BUY — waiting for fill")
             fill = await self._exchange.wait_for_fill(order_result["order_id"])
 
-            filled_price = fill.get("filled_avg_price", price)
-            filled_qty = fill.get("filled_qty", float(qty))
+            if fill.get("status") in ("cancelled", "expired"):
+                self.think(f"[{bot_id}] {pair} BUY order {fill.get('status')} — skipping")
+                return {"status": fill["status"], "pair": pair, "reason": f"order {fill['status']}"}
+
+            filled_price = fill.get("filled_avg_price", 0)
+            filled_qty = fill.get("filled_qty", 0)
+
+            if filled_qty <= 0 or filled_price <= 0:
+                self.think(f"[{bot_id}] {pair} BUY: zero fill — skipping")
+                return {"status": "skip", "pair": pair, "reason": "zero fill"}
             slippage_bps = ((filled_price - price) / price * 10000) if price > 0 else 0
 
             self.think(f"[{bot_id}] FILLED {pair} BUY: {filled_qty} @ ${filled_price:,.2f} (slip={slippage_bps:.1f}bps)")
@@ -172,10 +180,18 @@ class OrderExecutorAgent(BaseAgent):
             self.think(f"[{bot_id}] Order submitted {pair} SELL — waiting for fill")
             fill = await self._exchange.wait_for_fill(order_result["order_id"])
 
-            filled_price = fill.get("filled_avg_price", 0)
-            filled_qty = fill.get("filled_qty", float(qty))
+            if fill.get("status") in ("cancelled", "expired"):
+                self.think(f"[{bot_id}] {pair} SELL order {fill.get('status')} — not recording PnL")
+                return {"status": fill["status"], "pair": pair, "reason": f"order {fill['status']}"}
 
-            cost_basis = entry_price * qty
+            filled_price = fill.get("filled_avg_price", 0)
+            filled_qty = fill.get("filled_qty", 0)
+
+            if filled_qty <= 0 or filled_price <= 0:
+                self.think(f"[{bot_id}] {pair} SELL: zero fill (qty={filled_qty}, price={filled_price}) — skipping PnL")
+                return {"status": "skip", "pair": pair, "reason": "zero fill qty/price"}
+
+            cost_basis = entry_price * Decimal(str(filled_qty))
             pnl = Decimal(str(filled_price)) * Decimal(str(filled_qty)) - cost_basis
             pnl_pct = float(pnl / cost_basis * 100) if cost_basis > 0 else 0
             slippage_bps = ((filled_price - current_price_ref) / current_price_ref * 10000) if current_price_ref > 0 else 0

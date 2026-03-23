@@ -498,6 +498,51 @@ class CoinbaseCryptoService:
             "filled_avg_price": avg_price,
         }
 
+    def get_fills(
+        self,
+        product_id: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Fetch trade fill history from Coinbase. Requires auth."""
+        self._require_auth()
+        kwargs: dict[str, Any] = {"limit": limit}
+        if product_id:
+            kwargs["product_id"] = product_id
+        if start_date:
+            kwargs["start_sequence_timestamp"] = start_date
+        if end_date:
+            kwargs["end_sequence_timestamp"] = end_date
+        if cursor:
+            kwargs["cursor"] = cursor
+        raw = self._to_dict(self._auth.get_fills(**kwargs))
+        return raw
+
+    def get_all_fills(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginate through all fills. Returns list of fill dicts."""
+        self._require_auth()
+        all_fills: list[dict[str, Any]] = []
+        cursor: str | None = None
+
+        for _ in range(200):
+            raw = self.get_fills(
+                start_date=start_date, end_date=end_date,
+                cursor=cursor, limit=100,
+            )
+            fills = raw.get("fills", [])
+            all_fills.extend(fills)
+            cursor = raw.get("cursor")
+            if not cursor or not fills:
+                break
+
+        return all_fills
+
     async def wait_for_fill(self, order_id: str, timeout_sec: int = 60) -> dict[str, Any]:
         """Poll until order is filled or timeout."""
         deadline = asyncio.get_event_loop().time() + timeout_sec
