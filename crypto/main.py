@@ -369,8 +369,8 @@ async def tick_15s(
                         ind = compute_all(bars_5m)
                         _state["indicators_5m"][pair] = ind
                         _state["candles_5m"][pair] = bars_5m[-120:]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("bars_5m_fetch_error", pair=pair, error=str(e))
 
                 try:
                     bars_1m = await asyncio.to_thread(
@@ -378,21 +378,21 @@ async def tick_15s(
                     )
                     if bars_1m:
                         _state["candles_1m"][pair] = bars_1m[-120:]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("bars_1m_fetch_error", pair=pair, error=str(e))
 
             # 4H indicators for SwingSniper (computed less often but refreshed here)
             for pair in settings.crypto.pair_list:
                 try:
                     bars_4h = await asyncio.to_thread(
-                        exchange.get_bars, pair, granularity="FOUR_HOUR", lookback_minutes=90 * 24 * 60,
+                        exchange.get_bars, pair, granularity="FOUR_HOUR", lookback_minutes=30 * 24 * 60,
                     )
                     if len(bars_4h) >= 30:
                         ind = compute_all(bars_4h)
                         _state["indicators_4h"][pair] = ind
                         _state["candles_4h"][pair] = bars_4h[-120:]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("bars_4h_fetch_error", pair=pair, error=str(e))
 
             # Regime detection on hourly candles
             try:
@@ -410,8 +410,8 @@ async def tick_15s(
                         "features": regime_state.features,
                     }
                     _state["regime"] = regime_dict
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("regime_detection_error", error=str(e))
 
             # Portfolio + positions
             portfolio = await get_portfolio_state(exchange)
@@ -429,8 +429,8 @@ async def tick_15s(
                 enriched = await enrich_positions(raw_pos)
                 _state["positions"] = enriched
                 await sync_positions_to_db(enriched)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("positions_sync_error", error=str(e))
 
         except Exception as e:
             logger.error("tick_15s_error", error_msg=str(e))
@@ -542,9 +542,12 @@ async def tick_day_sniper(
         except Exception as e:
             logger.error("tick_day_sniper_error", error_msg=str(e))
 
-        from services.settings_store import save_agent_log as _sal, load_pnl_summary
-        await _sal(_state.get("agent_log", []))
-        _state["pnl_summary"] = await load_pnl_summary()
+        try:
+            from services.settings_store import save_agent_log as _sal, load_pnl_summary
+            await _sal(_state.get("agent_log", []))
+            _state["pnl_summary"] = await load_pnl_summary()
+        except Exception as e:
+            logger.warning("day_sniper_log_save_error", error=str(e))
 
         await asyncio.sleep(settings.crypto.day_eval_interval_sec)
 
@@ -699,9 +702,12 @@ async def tick_swing_sniper(
         except Exception as e:
             logger.error("tick_swing_sniper_error", error_msg=str(e))
 
-        from services.settings_store import save_agent_log as _sal, load_pnl_summary
-        await _sal(_state.get("agent_log", []))
-        _state["pnl_summary"] = await load_pnl_summary()
+        try:
+            from services.settings_store import save_agent_log as _sal, load_pnl_summary
+            await _sal(_state.get("agent_log", []))
+            _state["pnl_summary"] = await load_pnl_summary()
+        except Exception as e:
+            logger.warning("swing_sniper_log_save_error", error=str(e))
 
         await asyncio.sleep(settings.crypto.swing_eval_interval_sec)
 
@@ -1084,27 +1090,41 @@ async def run() -> None:
             logger.exception("web_server_error")
 
     async def _run_tasks():
-        core_tasks = [
-            asyncio.create_task(heartbeat_loop(redis_conn), name="heartbeat"),
-            asyncio.create_task(tick_15s(price_tracker, exchange), name="tick_15s"),
-            asyncio.create_task(tick_day_sniper(day_bot, risk_guard, executor, price_tracker, exchange), name="day_sniper"),
-            asyncio.create_task(tick_day_exit_check(executor, exchange), name="day_exit"),
-            asyncio.create_task(tick_swing_sniper(swing_bot, risk_guard, executor, price_tracker, exchange), name="swing_sniper"),
-            asyncio.create_task(tick_swing_exit_check(executor, exchange), name="swing_exit"),
-            asyncio.create_task(tick_news_onchain(news_agent), name="news_onchain"),
-            asyncio.create_task(tick_1h(telegram, exchange), name="tick_1h"),
-            asyncio.create_task(tick_24h(telegram), name="tick_24h"),
-            asyncio.create_task(tick_daily_backtest(exchange, redis_conn, telegram), name="daily_backtest"),
-            asyncio.create_task(_safe_web_serve(), name="web"),
-        ]
+        task_factories = {
+            "heartbeat": lambda: heartbeat_loop(redis_conn),
+            "tick_15s": lambda: tick_15s(price_tracker, exchange),
+            "day_sniper": lambda: tick_day_sniper(day_bot, risk_guard, executor, price_tracker, exchange),
+            "day_exit": lambda: tick_day_exit_check(executor, exchange),
+            "swing_sniper": lambda: tick_swing_sniper(swing_bot, risk_guard, executor, price_tracker, exchange),
+            "swing_exit": lambda: tick_swing_exit_check(executor, exchange),
+            "news_onchain": lambda: tick_news_onchain(news_agent),
+            "tick_1h": lambda: tick_1h(telegram, exchange),
+            "tick_24h": lambda: tick_24h(telegram),
+            "daily_backtest": lambda: tick_daily_backtest(exchange, redis_conn, telegram),
+            "web": lambda: _safe_web_serve(),
+        }
         if is_tty and live_ctx:
-            core_tasks.append(asyncio.create_task(display_loop(live_ctx, settings), name="display"))
+            task_factories["display"] = lambda: display_loop(live_ctx, settings)
 
-        await _shutdown.wait()
+        core_tasks: dict[str, asyncio.Task] = {}
+        for name, factory in task_factories.items():
+            core_tasks[name] = asyncio.create_task(factory(), name=name)
+
+        while not _shutdown.is_set():
+            for name, task in list(core_tasks.items()):
+                if task.done() and not _shutdown.is_set():
+                    exc = task.exception() if not task.cancelled() else None
+                    logger.error("task_died_restarting", task=name,
+                                 error=str(exc) if exc else "cancelled")
+                    core_tasks[name] = asyncio.create_task(
+                        task_factories[name](), name=name
+                    )
+            await asyncio.sleep(5)
+
         web_server.should_exit = True
-        for t in core_tasks:
+        for t in core_tasks.values():
             t.cancel()
-        await asyncio.gather(*core_tasks, return_exceptions=True)
+        await asyncio.gather(*core_tasks.values(), return_exceptions=True)
 
     if live_ctx:
         with live_ctx:

@@ -10,6 +10,7 @@ with ECDSA (ES256) signature algorithm.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -23,6 +24,12 @@ from config import get_settings
 logger = structlog.get_logger(__name__)
 
 API_BASE = "https://api.coinbase.com"
+
+_AUTH_FAIL_COUNT = 0
+_AUTH_FAIL_LAST_LOG: float = 0
+_AUTH_CIRCUIT_OPEN_UNTIL: float = 0
+_AUTH_CIRCUIT_BACKOFF = 300  # 5 min cooldown after repeated failures
+_AUTH_FAIL_THRESHOLD = 3
 
 
 def _to_product_id(pair: str) -> str:
@@ -186,49 +193,80 @@ class CoinbaseCryptoService:
     def get_bars(
         self,
         pair: str,
-        timeframe: Any = None,
+        granularity: str | None = None,
         lookback_minutes: int = 120,
+        timeframe: Any = None,
     ) -> list[dict[str, Any]]:
-        """Fetch OHLCV candles. Uses public endpoints."""
+        """Fetch OHLCV candles. Uses public endpoints.
+
+        Args:
+            granularity: Coinbase granularity string (e.g. ONE_MINUTE, FIVE_MINUTE,
+                         FIFTEEN_MINUTE, ONE_HOUR, FOUR_HOUR, ONE_DAY).
+                         If not provided, inferred from lookback_minutes.
+            lookback_minutes: How far back to fetch.
+        """
         product_id = _to_product_id(pair)
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=lookback_minutes)
 
-        if lookback_minutes <= 300:
-            granularity = "ONE_MINUTE"
-        elif lookback_minutes <= 1500:
-            granularity = "FIVE_MINUTE"
-        elif lookback_minutes <= 6000:
-            granularity = "FIFTEEN_MINUTE"
-        else:
-            granularity = "ONE_HOUR"
+        if granularity is None:
+            if lookback_minutes <= 300:
+                granularity = "ONE_MINUTE"
+            elif lookback_minutes <= 1500:
+                granularity = "FIVE_MINUTE"
+            elif lookback_minutes <= 6000:
+                granularity = "FIFTEEN_MINUTE"
+            else:
+                granularity = "ONE_HOUR"
 
-        start_str = str(int(start.timestamp()))
-        end_str = str(int(end.timestamp()))
+        # Coinbase limits to 300 candles per request — paginate if needed
+        granularity_minutes = {
+            "ONE_MINUTE": 1, "FIVE_MINUTE": 5, "FIFTEEN_MINUTE": 15,
+            "ONE_HOUR": 60, "FOUR_HOUR": 240, "SIX_HOUR": 360, "ONE_DAY": 1440,
+        }
+        bar_size = granularity_minutes.get(granularity, 60)
+        max_candles_per_req = 300
+        max_span_minutes = max_candles_per_req * bar_size
 
-        raw = self._public.get_candles(
-            product_id=product_id,
-            start=start_str,
-            end=end_str,
-            granularity=granularity,
-        )
+        all_bars: list[dict[str, Any]] = []
+        chunk_end = end
+        while chunk_end > start:
+            chunk_start = max(start, chunk_end - timedelta(minutes=max_span_minutes))
+            start_str = str(int(chunk_start.timestamp()))
+            end_str = str(int(chunk_end.timestamp()))
 
-        candles = raw.get("candles", [])
-        bars = []
-        for c in candles:
-            ts = int(c.get("start", 0))
-            bars.append({
-                "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None,
-                "open": float(c.get("open", 0)),
-                "high": float(c.get("high", 0)),
-                "low": float(c.get("low", 0)),
-                "close": float(c.get("close", 0)),
-                "volume": float(c.get("volume", 0)),
-                "vwap": None,
-            })
+            raw = self._public.get_candles(
+                product_id=product_id,
+                start=start_str,
+                end=end_str,
+                granularity=granularity,
+            )
 
-        bars.sort(key=lambda b: b["timestamp"] or datetime.min.replace(tzinfo=timezone.utc))
-        return bars
+            candles = raw.get("candles", [])
+            for c in candles:
+                ts = int(c.get("start", 0))
+                all_bars.append({
+                    "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None,
+                    "open": float(c.get("open", 0)),
+                    "high": float(c.get("high", 0)),
+                    "low": float(c.get("low", 0)),
+                    "close": float(c.get("close", 0)),
+                    "volume": float(c.get("volume", 0)),
+                    "vwap": None,
+                })
+
+            if len(candles) == 0:
+                break
+            chunk_end = chunk_start
+
+        all_bars.sort(key=lambda b: b["timestamp"] or datetime.min.replace(tzinfo=timezone.utc))
+        seen_ts: set[datetime | None] = set()
+        deduped: list[dict[str, Any]] = []
+        for b in all_bars:
+            if b["timestamp"] not in seen_ts:
+                seen_ts.add(b["timestamp"])
+                deduped.append(b)
+        return deduped
 
     def get_product_price(self, pair: str) -> float:
         """Get current price for a single product. Public endpoint."""
@@ -247,6 +285,35 @@ class CoinbaseCryptoService:
                 "Coinbase trading not available — CDP API keys required. "
                 "Create at https://portal.cdp.coinbase.com/projects/api-keys"
             )
+        global _AUTH_CIRCUIT_OPEN_UNTIL
+        if time.monotonic() < _AUTH_CIRCUIT_OPEN_UNTIL:
+            remaining = int(_AUTH_CIRCUIT_OPEN_UNTIL - time.monotonic())
+            raise RuntimeError(f"Coinbase auth circuit open — retrying in {remaining}s")
+
+    @staticmethod
+    def _record_auth_success() -> None:
+        global _AUTH_FAIL_COUNT, _AUTH_CIRCUIT_OPEN_UNTIL
+        _AUTH_FAIL_COUNT = 0
+        _AUTH_CIRCUIT_OPEN_UNTIL = 0
+
+    @staticmethod
+    def _record_auth_failure(error: str) -> None:
+        global _AUTH_FAIL_COUNT, _AUTH_FAIL_LAST_LOG, _AUTH_CIRCUIT_OPEN_UNTIL
+        _AUTH_FAIL_COUNT += 1
+        now = time.monotonic()
+        if _AUTH_FAIL_COUNT >= _AUTH_FAIL_THRESHOLD:
+            _AUTH_CIRCUIT_OPEN_UNTIL = now + _AUTH_CIRCUIT_BACKOFF
+            if now - _AUTH_FAIL_LAST_LOG > 60:
+                logger.error(
+                    "coinbase_auth_circuit_open",
+                    consecutive_failures=_AUTH_FAIL_COUNT,
+                    retry_in_sec=_AUTH_CIRCUIT_BACKOFF,
+                    error=error[:120],
+                )
+                _AUTH_FAIL_LAST_LOG = now
+        elif now - _AUTH_FAIL_LAST_LOG > 30:
+            logger.warning("coinbase_auth_failed", error=error[:120], attempt=_AUTH_FAIL_COUNT)
+            _AUTH_FAIL_LAST_LOG = now
 
     @staticmethod
     def _to_dict(resp: Any) -> dict:
@@ -260,7 +327,12 @@ class CoinbaseCryptoService:
     def get_account(self) -> dict[str, Any]:
         """Return account summary. Requires CDP auth."""
         self._require_auth()
-        raw = self._to_dict(self._auth.get_accounts(limit=250))
+        try:
+            raw = self._to_dict(self._auth.get_accounts(limit=250))
+        except requests.exceptions.HTTPError as e:
+            self._record_auth_failure(str(e))
+            raise
+        self._record_auth_success()
         accounts = raw.get("accounts", [])
 
         cash = 0.0
@@ -290,7 +362,12 @@ class CoinbaseCryptoService:
     def get_positions(self) -> list[dict[str, Any]]:
         """Return non-zero crypto holdings. Requires CDP auth."""
         self._require_auth()
-        raw = self._to_dict(self._auth.get_accounts(limit=250))
+        try:
+            raw = self._to_dict(self._auth.get_accounts(limit=250))
+        except requests.exceptions.HTTPError as e:
+            self._record_auth_failure(str(e))
+            raise
+        self._record_auth_success()
         accounts = raw.get("accounts", [])
         positions: list[dict[str, Any]] = []
 

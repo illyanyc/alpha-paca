@@ -51,7 +51,7 @@ class CryptoTradingSettings(BaseSettings):
     pairs: str = "BTC/USD,ETH/USD,SOL/USD"
     max_risk_per_trade_pct: float = 5.0
     max_leverage: float = 5.0
-    min_conviction: float = 0.75
+    min_conviction: float = 0.55
     daily_loss_halt_pct: float = 5.0
     max_drawdown_pct: float = 10.0
     max_concurrent_per_bot: int = 3
@@ -64,7 +64,7 @@ class CryptoTradingSettings(BaseSettings):
     # Swing bot
     swing_min_rr_ratio: float = 2.0
     swing_min_trade_interval_sec: int = 3600
-    swing_eval_interval_sec: int = 3600
+    swing_eval_interval_sec: int = 900
     # Cooldown
     cooldown_after_losses: int = 3
     cooldown_halt_after_losses: int = 5
