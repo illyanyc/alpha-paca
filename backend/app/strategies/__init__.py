@@ -5,6 +5,7 @@ from app.strategies.mean_reversion.pod import MeanReversionPod
 from app.strategies.momentum.pod import MomentumPod
 from app.strategies.sector_rotation.pod import SectorRotationPod
 from app.strategies.stat_arb.pod import StatArbPod
+from app.strategies.volatility.pod import VolatilityPod
 
 __all__ = [
     "MomentumPod",
@@ -12,4 +13,5 @@ __all__ = [
     "EventDrivenPod",
     "SectorRotationPod",
     "StatArbPod",
+    "VolatilityPod",
 ]

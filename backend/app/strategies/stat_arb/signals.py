@@ -6,6 +6,8 @@ from typing import Any
 
 import structlog
 
+from app.engine.regime.models import RegimeOutput
+
 logger = structlog.get_logger(__name__)
 
 Z_ENTRY_THRESHOLD = 2.0
@@ -20,15 +22,20 @@ class StatArbSignalGenerator:
     def generate(
         self,
         candidates: list[dict[str, Any]],
+        regime: RegimeOutput | None = None,
     ) -> list[dict[str, Any]]:
         signals: list[dict[str, Any]] = []
         for c in candidates:
-            signal = self._build_signal(c)
+            signal = self._build_signal(c, regime=regime)
             if signal is not None:
                 signals.append(signal)
         return signals
 
-    def _build_signal(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
+    def _build_signal(
+        self,
+        candidate: dict[str, Any],
+        regime: RegimeOutput | None = None,
+    ) -> dict[str, Any] | None:
         spread_z = candidate.get("spread_z", 0.0)
         if abs(spread_z) < Z_ENTRY_THRESHOLD:
             return None
@@ -47,7 +54,7 @@ class StatArbSignalGenerator:
             "signal_name": "pairs_spread",
             "alpha_score": score,
             "z_score": spread_z,
-            "ic_weight": 0.0,
+            "ic_weight": min(max((1.0 - candidate.get("p_value", 1.0)) * 0.15, 0.03), 0.30),
             "composite_score": score,
             "side": side,
             "entry_price": entry_price,

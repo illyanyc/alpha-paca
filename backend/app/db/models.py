@@ -296,6 +296,71 @@ class DrawdownState(Base):
     )
 
 
+class RegimeHistory(Base):
+    __tablename__ = "regime_history"
+    __table_args__ = (
+        Index("ix_regime_history_detected_at", "detected_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    dominant_regime: Mapped[str] = mapped_column(String(32))
+    probabilities: Mapped[dict] = mapped_column(JSONB)
+    confidence: Mapped[float] = mapped_column(Numeric)
+    benchmark_symbol: Mapped[str] = mapped_column(String(16))
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DriftEventLog(Base):
+    __tablename__ = "drift_events"
+    __table_args__ = (
+        Index("ix_drift_events_detected_at", "detected_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    pod_name: Mapped[str] = mapped_column(String(64))
+    severity: Mapped[str] = mapped_column(String(16))
+    drift_score: Mapped[float] = mapped_column(Numeric)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class CircuitBreakerLog(Base):
+    __tablename__ = "circuit_breaker_log"
+    __table_args__ = (
+        Index("ix_circuit_breaker_log_timestamp", "timestamp"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    target: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(Text)
+    prev_level: Mapped[str] = mapped_column(String(32))
+    new_level: Mapped[str] = mapped_column(String(32))
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class StrategyEvolution(Base):
+    __tablename__ = "strategy_evolution"
+    __table_args__ = (
+        Index("ix_strategy_evolution_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    generation: Mapped[int] = mapped_column(Integer)
+    best_fitness: Mapped[float] = mapped_column(Numeric)
+    avg_fitness: Mapped[float] = mapped_column(Numeric)
+    best_genome: Mapped[dict] = mapped_column(JSONB)
+    promoted_to_paper: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class SignalICTracking(Base):
     __tablename__ = "signal_ic_tracking"
     __table_args__ = (

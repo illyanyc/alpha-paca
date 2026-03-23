@@ -1,4 +1,4 @@
-"""Statistical arbitrage strategy pod."""
+"""Volatility strategy pod — harvests crisis alpha via VIX mean reversion."""
 
 from __future__ import annotations
 
@@ -8,21 +8,21 @@ import structlog
 
 from app.services.alpaca_client import AlpacaService
 from app.strategies.base_pod import BasePod
-from app.strategies.stat_arb.scanner import StatArbScanner
-from app.strategies.stat_arb.signals import StatArbSignalGenerator
+from app.strategies.volatility.scanner import VolatilityScanner
+from app.strategies.volatility.signals import VolatilitySignalGenerator
 
 logger = structlog.get_logger(__name__)
 
 
-class StatArbPod(BasePod):
-    """Pairs trading based on cointegration and spread z-scores."""
+class VolatilityPod(BasePod):
+    """Captures crisis alpha via VIX mean reversion and volatility spread trading."""
 
     def __init__(self, alpaca: AlpacaService | None = None) -> None:
-        self._scanner = StatArbScanner(alpaca or AlpacaService())
-        self._signal_gen = StatArbSignalGenerator()
+        self._scanner = VolatilityScanner(alpaca or AlpacaService())
+        self._signal_gen = VolatilitySignalGenerator()
 
     def get_pod_name(self) -> str:
-        return "stat_arb"
+        return "volatility"
 
     def run_scan(self, universe: list[str]) -> list[dict[str, Any]]:
         return self._scanner.scan(universe)

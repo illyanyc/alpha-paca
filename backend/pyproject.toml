@@ -1,0 +1,43 @@
+[project]
+name = "alpha-paca-backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    # Web / API
+    "fastapi",
+    "uvicorn[standard]",
+    "websockets",
+    # Config & validation
+    "pydantic>=2.0",
+    "pydantic-settings",
+    "pydantic-ai",
+    # Database
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg",
+    "alembic",
+    # Broker & HTTP
+    "alpaca-py",
+    "httpx",
+    # Observability & utilities
+    "structlog",
+    "numpy",
+    "redis",
+    # Auth
+    "python-jose[cryptography]",
+    "passlib[bcrypt]",
+    # Data / ML
+    "statsmodels",
+    "scipy",
+    # Scheduler
+    "apscheduler>=4.0.0a6",
+    # ML
+    "hmmlearn",
+    # Future (uncomment when needed)
+    # "stable-baselines3",
+    # "gymnasium",
+    # "deap",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

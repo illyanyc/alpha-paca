@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any
 
 import redis.asyncio as redis_async
@@ -326,6 +327,39 @@ TUNABLE_SETTINGS: dict[str, dict[str, Any]] = {
         "max": 5.0,
         "step": 0.1,
     },
+    "kelly.fraction": {
+        "default": 0.25,
+        "type": "float",
+        "env_var": "KELLY_FRACTION",
+        "category": "position_sizing",
+        "label": "Kelly Fraction",
+        "description": "Fraction of full Kelly to use (0.25 = quarter-Kelly)",
+        "min": 0.1,
+        "max": 1.0,
+        "step": 0.05,
+    },
+    "kelly.min_risk_pct": {
+        "default": 0.5,
+        "type": "float",
+        "env_var": "KELLY_MIN_RISK_PCT",
+        "category": "position_sizing",
+        "label": "Kelly Min Risk %",
+        "description": "Minimum risk per trade percentage",
+        "min": 0.1,
+        "max": 2.0,
+        "step": 0.1,
+    },
+    "kelly.max_risk_pct": {
+        "default": 3.0,
+        "type": "float",
+        "env_var": "KELLY_MAX_RISK_PCT",
+        "category": "position_sizing",
+        "label": "Kelly Max Risk %",
+        "description": "Maximum risk per trade percentage",
+        "min": 1.0,
+        "max": 10.0,
+        "step": 0.5,
+    },
 }
 
 
@@ -387,6 +421,11 @@ class HotConfig:
 
     def get_all(self) -> dict[str, Any]:
         return dict(self._memory)
+
+    def items(self) -> Iterator[tuple[str, Any]]:
+        """Iterate effective values for all tunable keys (for validator hot-config injection)."""
+        for k in TUNABLE_SETTINGS:
+            yield k, self.get(k)
 
     def get_by_category(self, category: str) -> dict[str, Any]:
         keys = [k for k, m in TUNABLE_SETTINGS.items() if m.get("category") == category]

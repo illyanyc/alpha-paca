@@ -6,6 +6,8 @@ from typing import Any
 
 import structlog
 
+from app.engine.regime.models import RegimeOutput
+
 logger = structlog.get_logger(__name__)
 
 SURPRISE_THRESHOLD = 5.0
@@ -19,15 +21,20 @@ class EventDrivenSignalGenerator:
     def generate(
         self,
         candidates: list[dict[str, Any]],
+        regime: RegimeOutput | None = None,
     ) -> list[dict[str, Any]]:
         signals: list[dict[str, Any]] = []
         for c in candidates:
-            signal = self._build_signal(c)
+            signal = self._build_signal(c, regime=regime)
             if signal is not None:
                 signals.append(signal)
         return signals
 
-    def _build_signal(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
+    def _build_signal(
+        self,
+        candidate: dict[str, Any],
+        regime: RegimeOutput | None = None,
+    ) -> dict[str, Any] | None:
         catalyst_score = candidate.get("catalyst_score", 0.0)
         surprise_pct = candidate.get("surprise_pct", 0.0)
         sentiment = candidate.get("news_sentiment", 0.0)
@@ -63,7 +70,7 @@ class EventDrivenSignalGenerator:
             "signal_name": "catalyst_event",
             "alpha_score": score,
             "z_score": 0.0,
-            "ic_weight": 0.0,
+            "ic_weight": min(max(score * 0.12, 0.03), 0.30),
             "composite_score": score,
             "side": side,
             "entry_price": entry_price,

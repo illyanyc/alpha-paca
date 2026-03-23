@@ -53,11 +53,18 @@ class BasePod(ABC):
         self,
         signal: dict[str, Any],
         portfolio_nav: float,
+        kelly_sizer: Any | None = None,
+        regime: Any | None = None,
     ) -> float:
         """Risk-per-trade position sizing (percentage of NAV).
 
-        Uses the configured ``risk_per_trade_pct`` and clamps to ``max_position_pct``.
+        Delegates to KellySizer when available; otherwise falls back to
+        fixed-fractional sizing via ``risk_per_trade_pct``.
         """
+        if kelly_sizer is not None:
+            return kelly_sizer.compute_position_size(
+                signal, portfolio_nav, self.get_pod_name(), regime
+            )
         settings = get_settings()
         risk_pct = settings.position_sizing.risk_per_trade_pct / 100
         max_pct = settings.position_sizing.max_position_pct / 100

@@ -7,6 +7,8 @@ from typing import Any
 import numpy as np
 import structlog
 
+from app.engine.regime.models import RegimeOutput, RegimeState
+
 logger = structlog.get_logger(__name__)
 
 RSI_OVERBOUGHT = 70
@@ -21,15 +23,20 @@ class MomentumSignalGenerator:
     def generate(
         self,
         candidates: list[dict[str, Any]],
+        regime: RegimeOutput | None = None,
     ) -> list[dict[str, Any]]:
         signals: list[dict[str, Any]] = []
         for c in candidates:
-            signal = self._build_signal(c)
+            signal = self._build_signal(c, regime=regime)
             if signal is not None:
                 signals.append(signal)
         return signals
 
-    def _build_signal(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
+    def _build_signal(
+        self,
+        candidate: dict[str, Any],
+        regime: RegimeOutput | None = None,
+    ) -> dict[str, Any] | None:
         """Score a candidate and produce a signal dict if it passes thresholds."""
         rsi = candidate.get("rsi", 50.0)
         macd_hist = candidate.get("macd_hist", 0.0)
@@ -50,7 +57,14 @@ class MomentumSignalGenerator:
 
         score += candidate.get("momentum_score", 0.0) * 0.3
 
-        if score < 0.1:
+        threshold = 0.1
+        if regime is not None:
+            if regime.dominant == RegimeState.BULL_TREND:
+                threshold = 0.05
+            elif regime.dominant == RegimeState.SIDEWAYS:
+                threshold = 0.2
+
+        if score < threshold:
             return None
 
         stop_loss = entry_price * (1 - DEFAULT_STOP_PCT) if side == "long" else entry_price * (1 + DEFAULT_STOP_PCT)
@@ -66,7 +80,7 @@ class MomentumSignalGenerator:
             "signal_name": "momentum_breakout",
             "alpha_score": score,
             "z_score": 0.0,
-            "ic_weight": 0.0,
+            "ic_weight": min(max(score * 0.15, 0.03), 0.30),
             "composite_score": score,
             "side": side,
             "entry_price": entry_price,

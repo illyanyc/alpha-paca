@@ -34,19 +34,19 @@
 - NEVER default to paper trading — always default `ALPACA_PAPER=false` (LIVE mode)
 - Stream agent thinking steps and decisions in real-time in both terminal and web UI
 - Always run tests before deploying to Railway
-- Dashboard should look like a Bloomberg Terminal — full-width, crypto icons per asset, count badges, larger fonts, real-time NAV (every 2s), mobile-optimized
-- Trade aggressively within risk-managed bounds — conviction-based sizing, daily loss halts, anti-churn cooldowns
+- Dashboard should look like a Bloomberg Terminal — full-width, crypto icons per asset, count badges, larger fonts, real-time NAV (every 2s), mobile-optimized with clear tap targets (chart buttons per row, not just click-on-row)
+- Prefer deterministic rule-based trading over LLM-driven entries — use LLM only for news sentiment classification, not core buy/sell decisions
 
 ## Learned Workspace Facts
-- `backend/` contains the main FastAPI stock-trading platform
+- `backend/` contains a 5-pod stock-trading platform (Momentum, Mean Reversion, Event-Driven, Sector Rotation, Stat Arb) with risk validators and hot-config; scanners remain stubbed — infrastructure is production-grade but live data pipeline needs completion
 - `dashboard/` contains the Next.js management dashboard
-- `crypto/` is a standalone autonomous crypto trading service with two AI bots (SwingSniper + DaySniper), shared RiskGuard, and a FastAPI-served web dashboard
+- `crypto/` is a standalone autonomous crypto trading service with a deterministic MomentumTrader (primary) + SwingSniper (secondary, LLM-driven), shared RiskGuard, ExitManager, and a FastAPI-served web dashboard with TradingView Lightweight Charts
 - `crypto/` reads env vars from parent `../.env.local`; `main.py` must `load_dotenv()` before PydanticAI agent imports; shares Railway Postgres and Redis
-- Coinbase spot is long-only (SHORT signals close existing longs); public endpoints need no auth; CDP PEM keys (JWT/ES256) for trading; normalize `coinbase-advanced-py` typed objects with `_to_dict()`
-- Coinbase order quantities must be truncated to each product's `base_increment` precision before submission
+- `crypto/engine/strategies.py` has a single `AdaptiveMomentumStrategy` with deterministic composite scoring (-100 to +100): Technical 50%, News/Sentiment 30%, On-Chain 20%; BUY threshold > 40, EXIT threshold < -20
+- `crypto/engine/exit_manager.py` manages ATR trailing stops (2.0 × ATR(14)), take profit (3.0 × ATR), time exits (23:00 UTC), signal exits (MACD bearish cross, RSI < 40), and hard stop (-3%)
+- `crypto/engine/leverage_sizer.py` uses ATR-based fixed-fractional sizing (1.5% risk per trade), capped at 33% of NAV
+- Coinbase spot is long-only (SHORT signals close existing longs); supports limit orders with `post_only=true` and bracket orders (`trigger_bracket_gtc` for TP/SL); quantities must be truncated to each product's `base_increment` precision
 - All crypto DB tables are prefixed `crypto_` to coexist with stock tables in the same database
-- `crypto/supervisor.py` is the entry point — spawns `main.py` with Redis heartbeat monitoring
-- DB tables are created via `create_tables.py` scripts (not Alembic migrations)
-- `crypto/engine/` has 8 institutional strategies, HMM regime detection, and multi-timeframe confluence; `risk_guard.py` enforces daily loss halts, drawdown breakers, anti-churn; `leverage_sizer.py` sizes by conviction + ATR; `backtester_v2.py` + `prompt_optimizer.py` run daily for continuous improvement
-- Order executor must verify fill status (`filled` vs `cancelled/expired`) before recording PnL — zero-fill cancelled orders cause phantom losses if processed blindly
-- `.railwayignore` must exclude `.venv` to prevent Railway snapshot/upload timeouts; "Failed to create code snapshot" errors are often transient — retry usually works
+- `crypto/supervisor.py` is the entry point — spawns `main.py` with Redis heartbeat monitoring; DB tables are created via `create_tables.py` scripts (not Alembic migrations)
+- Order executor must verify fill status (`filled` vs `cancelled/expired`) before recording PnL — zero-fill cancelled orders cause phantom losses if processed blindly; always reconcile Coinbase trade history with local DB
+- `.railwayignore` must exclude `.venv` to prevent Railway snapshot/upload timeouts; Anthropic API keys are workspace-scoped — "credit balance too low" errors may occur even with account-level credits if the key belongs to a different workspace

@@ -6,6 +6,7 @@ from typing import Any
 
 import structlog
 
+from app.services.alpaca_client import AlpacaService
 from app.strategies.base_pod import BasePod
 from app.strategies.mean_reversion.scanner import MeanReversionScanner
 from app.strategies.mean_reversion.signals import MeanReversionSignalGenerator
@@ -16,8 +17,8 @@ logger = structlog.get_logger(__name__)
 class MeanReversionPod(BasePod):
     """Captures reversion to the mean via Bollinger bands and RSI extremes."""
 
-    def __init__(self) -> None:
-        self._scanner = MeanReversionScanner()
+    def __init__(self, alpaca: AlpacaService | None = None) -> None:
+        self._scanner = MeanReversionScanner(alpaca or AlpacaService())
         self._signal_gen = MeanReversionSignalGenerator()
 
     def get_pod_name(self) -> str:

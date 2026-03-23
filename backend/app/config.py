@@ -9,7 +9,7 @@ class AlpacaSettings(BaseSettings):
 
     api_key: str = ""
     api_secret: str = ""
-    paper: bool = True
+    paper: bool = False
 
 
 class APIKeySettings(BaseSettings):
@@ -38,9 +38,10 @@ class PodAllocationSettings(BaseSettings):
 
     momentum: int = 25
     mean_reversion: int = 20
-    event_driven: int = 25
-    sector_rotation: int = 20
-    stat_arb: int = 0
+    event_driven: int = 15
+    sector_rotation: int = 0
+    stat_arb: int = 25
+    volatility: int = 15
 
 
 class RiskEngineSettings(BaseSettings):
@@ -131,6 +132,29 @@ class SignalQualificationSettings(BaseSettings):
     signal_ic_disable_threshold: float = 0.0
 
 
+class RegimeSettings(BaseSettings):
+    """HMM regime detection parameters."""
+
+    model_config = SettingsConfigDict(env_prefix="REGIME_")
+
+    benchmark_symbol: str = "SPY"
+    training_window_days: int = 252
+    retrain_interval_days: int = 7
+    min_observations: int = 60
+    n_regimes: int = 4
+
+
+class KellySettings(BaseSettings):
+    """Kelly criterion position sizing parameters."""
+
+    model_config = SettingsConfigDict(env_prefix="KELLY_")
+
+    fraction: float = 0.25
+    min_risk_pct: float = 0.5
+    max_risk_pct: float = 3.0
+    rolling_window: int = 100
+
+
 class Settings(BaseSettings):
     """Root settings aggregating all sub-configurations."""
 
@@ -152,6 +176,8 @@ class Settings(BaseSettings):
     execution: ExecutionSettings = ExecutionSettings()
     pre_trade: PreTradeSettings = PreTradeSettings()
     signal_qualification: SignalQualificationSettings = SignalQualificationSettings()
+    regime: RegimeSettings = RegimeSettings()
+    kelly: KellySettings = KellySettings()
 
 
 _settings: Settings | None = None

@@ -6,6 +6,8 @@ from typing import Any
 
 import structlog
 
+from app.engine.regime.models import RegimeOutput
+
 logger = structlog.get_logger(__name__)
 
 ROTATION_SCORE_THRESHOLD = 0.10
@@ -19,6 +21,7 @@ class SectorRotationSignalGenerator:
     def generate(
         self,
         candidates: list[dict[str, Any]],
+        regime: RegimeOutput | None = None,
     ) -> list[dict[str, Any]]:
         if not candidates:
             return []
@@ -29,12 +32,12 @@ class SectorRotationSignalGenerator:
         bottom = [c for c in candidates if c.get("relative_strength", 0) < -ROTATION_SCORE_THRESHOLD]
 
         for c in top:
-            sig = self._build_signal(c, side="long")
+            sig = self._build_signal(c, side="long", regime=regime)
             if sig:
                 signals.append(sig)
 
         for c in bottom:
-            sig = self._build_signal(c, side="short")
+            sig = self._build_signal(c, side="short", regime=regime)
             if sig:
                 signals.append(sig)
 
@@ -44,6 +47,7 @@ class SectorRotationSignalGenerator:
         self,
         candidate: dict[str, Any],
         side: str,
+        regime: RegimeOutput | None = None,
     ) -> dict[str, Any] | None:
         entry_price = candidate.get("last_price", 0.0) or 0.0
         rs = abs(candidate.get("relative_strength", 0.0))
@@ -69,7 +73,7 @@ class SectorRotationSignalGenerator:
             "signal_name": "sector_momentum",
             "alpha_score": score,
             "z_score": 0.0,
-            "ic_weight": 0.0,
+            "ic_weight": min(max(rs * 0.10, 0.03), 0.25),
             "composite_score": score,
             "side": side,
             "entry_price": entry_price,

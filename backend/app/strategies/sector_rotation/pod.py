@@ -6,6 +6,7 @@ from typing import Any
 
 import structlog
 
+from app.services.alpaca_client import AlpacaService
 from app.strategies.base_pod import BasePod
 from app.strategies.sector_rotation.scanner import SectorRotationScanner
 from app.strategies.sector_rotation.signals import SectorRotationSignalGenerator
@@ -16,8 +17,8 @@ logger = structlog.get_logger(__name__)
 class SectorRotationPod(BasePod):
     """Rotates capital into sectors exhibiting relative strength."""
 
-    def __init__(self) -> None:
-        self._scanner = SectorRotationScanner()
+    def __init__(self, alpaca: AlpacaService | None = None) -> None:
+        self._scanner = SectorRotationScanner(alpaca or AlpacaService())
         self._signal_gen = SectorRotationSignalGenerator()
 
     def get_pod_name(self) -> str:

@@ -31,6 +31,18 @@ class OptimizationResult(BaseModel):
     data_quality_notes: list[str]
 
 
+class SuggestionEffectiveness(BaseModel):
+    """Track whether a past suggestion improved performance."""
+
+    suggestion_key: str
+    old_value: float
+    new_value: float
+    applied_at: str
+    pnl_before_30d: float = 0.0
+    pnl_after_30d: float = 0.0
+    effectiveness_score: float = 0.0
+
+
 async def _collect_trade_stats(session: AsyncSession, lookback_days: int) -> dict[str, Any]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     total = await session.scalar(
@@ -142,6 +154,39 @@ async def _collect_portfolio_state(session: AsyncSession) -> dict[str, Any] | No
     }
 
 
+async def _collect_suggestion_effectiveness(
+    session: AsyncSession,
+    lookback_days: int = 60,
+) -> list[dict[str, Any]]:
+    """Check if previous optimization suggestions improved performance."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    stmt = (
+        select(Trade)
+        .where(Trade.entry_time >= cutoff, Trade.exit_time.isnot(None))
+        .order_by(Trade.entry_time)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    if not rows:
+        return []
+
+    mid = len(rows) // 2
+    first_half = rows[:mid]
+    second_half = rows[mid:]
+
+    pnl_first = sum(float(t.pnl or 0) for t in first_half)
+    pnl_second = sum(float(t.pnl or 0) for t in second_half)
+
+    return [
+        {
+            "period": "effectiveness_check",
+            "pnl_first_half": pnl_first,
+            "pnl_second_half": pnl_second,
+            "improvement": pnl_second - pnl_first,
+            "total_trades": len(rows),
+        }
+    ]
+
+
 def _collect_current_settings(hot_config: Any) -> dict[str, Any]:
     return hot_config.get_all()
 
@@ -155,6 +200,12 @@ Rules:
 - Prefer stability: small deltas unless data strongly supports larger moves.
 - confidence must be exactly "high", "medium", or "low".
 Return structured output matching OptimizationResult.
+
+If regime_context is provided, factor it into your suggestions:
+- In BULL regimes, favor momentum parameters and wider stops
+- In BEAR regimes, favor defensive sizing and tighter risk limits
+- In SIDEWAYS regimes, favor mean-reversion parameters
+- In CRISIS regimes, recommend reduced position sizes and tighter drawdown limits
 """
 
 
@@ -180,11 +231,26 @@ async def run_optimization(
     if not signal_ic:
         notes.append("No signal_ic_tracking rows available.")
 
+    effectiveness = await _collect_suggestion_effectiveness(db_session, lookback_days)
+    if not effectiveness:
+        notes.append("No effectiveness data available.")
+
     portfolio = await _collect_portfolio_state(db_session)
     if portfolio is None:
         notes.append("portfolio_state is empty.")
 
     current_settings = _collect_current_settings(hot_config)
+
+    regime_context = None
+    orchestrator = getattr(hot_config, "_orchestrator", None) if hot_config else None
+    if orchestrator is not None:
+        current_regime = getattr(orchestrator, "_current_regime", None)
+        if current_regime is not None:
+            regime_context = {
+                "dominant": current_regime.dominant.value,
+                "probabilities": current_regime.probabilities,
+                "confidence": current_regime.confidence,
+            }
 
     payload = {
         "lookback_days": lookback_days,
@@ -192,8 +258,10 @@ async def run_optimization(
         "pod_performance": pod_perf,
         "backtest_results": backtests,
         "signal_ic": signal_ic,
+        "suggestion_effectiveness": effectiveness,
         "portfolio_state": portfolio,
         "current_settings": current_settings,
+        "regime_context": regime_context,
     }
     user_prompt = (
         "Analyze the following JSON data and produce OptimizationResult JSON-compatible output.\n\n"

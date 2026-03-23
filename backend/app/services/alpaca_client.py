@@ -74,6 +74,12 @@ class AlpacaService:
     def cancel_order(self, order_id: str) -> Any:
         return self._trading.cancel_order_by_id(order_id)
 
+    def get_asset(self, symbol: str) -> Any:
+        return self._trading.get_asset(symbol)
+
+    def get_order_by_id(self, order_id: str) -> Any:
+        return self._trading.get_order_by_id(order_id)
+
     def get_clock(self) -> Any:
         return self._trading.get_clock()
 

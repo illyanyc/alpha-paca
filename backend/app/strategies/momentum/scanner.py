@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
 import structlog
+
+from app.services.alpaca_client import AlpacaService
 
 logger = structlog.get_logger(__name__)
 
@@ -15,39 +18,63 @@ MACD_SLOW = 26
 MACD_SIGNAL = 9
 BREAKOUT_LOOKBACK = 20
 
+RSI_WEIGHT = 0.35
+MACD_WEIGHT = 0.35
+BREAKOUT_WEIGHT = 0.30
+
 
 class MomentumScanner:
     """Scans a universe for momentum candidates using RSI, MACD, and price breakouts."""
 
+    def __init__(self, alpaca: AlpacaService) -> None:
+        self._alpaca = alpaca
+
     def scan(self, universe: list[str]) -> list[dict[str, Any]]:
-        """Return candidate symbols with momentum scores.
-
-        In production this fetches market data; the implementation here shows
-        the scoring skeleton with placeholder price arrays.
-        """
         candidates: list[dict[str, Any]] = []
-
         for symbol in universe:
             candidate = self._score_symbol(symbol)
             if candidate is not None:
                 candidates.append(candidate)
-
         candidates.sort(key=lambda c: c["momentum_score"], reverse=True)
         logger.info("momentum_scan_complete", candidates=len(candidates))
         return candidates
 
     def _score_symbol(self, symbol: str) -> dict[str, Any] | None:
-        """Compute momentum indicators for a single symbol.
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=60)
+        try:
+            barset = self._alpaca.get_bars(symbol, "1Day", start, end)
+            bars_list = barset.data.get(symbol, []) if hasattr(barset, "data") else barset.get(symbol, [])
+            if not bars_list:
+                return None
+            closes = np.array([float(b.close) for b in bars_list])
+        except Exception:
+            logger.warning("momentum_scanner_data_fetch_failed", symbol=symbol)
+            return None
 
-        Returns ``None`` when insufficient data is available.
-        """
-        # Placeholder — real implementation would pull bars from data layer.
+        if len(closes) < MACD_SLOW + MACD_SIGNAL:
+            return None
+
+        rsi = self.compute_rsi(closes)
+        _, _, macd_hist = self.compute_macd(closes)
+        breakout = self.is_breakout(closes)
+
+        rsi_norm = (rsi - 50.0) / 50.0
+        macd_norm = np.clip(macd_hist / (float(np.std(closes)) + 1e-9), -1.0, 1.0)
+        breakout_val = 1.0 if breakout else 0.0
+
+        momentum_score = float(
+            RSI_WEIGHT * rsi_norm
+            + MACD_WEIGHT * macd_norm
+            + BREAKOUT_WEIGHT * breakout_val
+        )
+
         return {
             "symbol": symbol,
-            "rsi": 0.0,
-            "macd_hist": 0.0,
-            "breakout_flag": False,
-            "momentum_score": 0.0,
+            "rsi": rsi,
+            "macd_hist": macd_hist,
+            "breakout_flag": breakout,
+            "momentum_score": momentum_score,
         }
 
     @staticmethod
