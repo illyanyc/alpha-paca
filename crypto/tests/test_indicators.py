@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from engine.indicators import rsi, macd, bollinger_bands, vwap, atr, volume_sma, compute_all
+from engine.indicators import rsi, macd, bollinger_bands, vwap, atr, volume_sma, sma, compute_all
 
 
 def _make_closes(n: int = 100, start: float = 100.0) -> pd.Series:
@@ -97,17 +97,34 @@ class TestVWAP:
         assert all(df["low"].min() <= v <= df["high"].max() for v in valid)
 
 
+class TestSMA:
+    def test_sma_correct_value(self):
+        closes = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+        result = sma(closes, 3)
+        assert abs(result.iloc[-1] - 4.0) < 0.01  # (3+4+5)/3
+
+
 class TestComputeAll:
     def test_full_computation(self):
         bars = _make_bars(100)
         result = compute_all(bars)
         assert result["rsi"] is not None
+        assert result["rsi_5"] is not None
         assert result["macd_line"] is not None
+        assert result["macd_4h_line"] is not None
+        assert result["macd_4h_signal"] is not None
+        assert result["macd_4h_hist"] is not None
         assert result["bb_upper"] is not None
         assert result["atr"] is not None
         assert result["close"] is not None
+        assert result["vol_ratio_20"] is not None
+        assert result["sma_200"] is not None
+        assert isinstance(result["macd_4h_bullish_cross"], bool)
+        assert isinstance(result["macd_4h_bearish_cross"], bool)
 
     def test_insufficient_data(self):
         bars = _make_bars(10)
         result = compute_all(bars)
         assert result["rsi"] is None
+        assert result["rsi_5"] is None
+        assert result["vol_ratio_20"] is None

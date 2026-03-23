@@ -48,15 +48,33 @@ class CryptoTradingSettings(BaseSettings):
         env_prefix="CRYPTO_", env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
     )
     max_capital: float = 0.0
-    pairs: str = "BTC/USD,ETH/USD,SOL/USD"
-    max_risk_per_trade_pct: float = 5.0
+    pairs: str = "BTC/USD,ETH/USD,SOL/USD,XRP/USD"
+    max_risk_per_trade_pct: float = 1.5
     max_leverage: float = 5.0
     min_conviction: float = 0.55
-    daily_loss_halt_pct: float = 5.0
+    daily_loss_halt_pct: float = 2.0
     max_drawdown_pct: float = 10.0
     max_concurrent_per_bot: int = 3
-    max_concurrent_total: int = 5
-    # Day bot
+    max_concurrent_total: int = 3
+    # Adaptive Momentum strategy parameters
+    composite_buy_threshold: int = 40
+    composite_exit_threshold: int = -20
+    atr_stop_multiplier: float = 2.0
+    atr_tp_multiplier: float = 3.0
+    macd_fast: int = 8
+    macd_slow: int = 17
+    macd_signal: int = 9
+    rsi_period: int = 5
+    ema_fast: int = 8
+    ema_slow: int = 21
+    # Trading hours (UTC)
+    trading_hours_start: int = 13
+    trading_hours_end: int = 23
+    primary_window_end: int = 17
+    # Momentum trader
+    momentum_eval_interval_sec: int = 60
+    news_poll_interval_sec: int = 10
+    # Day bot (legacy, kept for backward compat)
     day_min_rr_ratio: float = 1.5
     day_min_trade_interval_sec: int = 300
     day_max_hold_hours: float = 6.0
@@ -64,7 +82,7 @@ class CryptoTradingSettings(BaseSettings):
     # Swing bot
     swing_min_rr_ratio: float = 2.0
     swing_min_trade_interval_sec: int = 3600
-    swing_eval_interval_sec: int = 900
+    swing_eval_interval_sec: int = 14400
     # Cooldown
     cooldown_after_losses: int = 3
     cooldown_halt_after_losses: int = 5

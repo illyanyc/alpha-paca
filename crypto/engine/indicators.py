@@ -1,4 +1,8 @@
-"""Technical indicators for crypto price analysis."""
+"""Technical indicators for crypto price analysis.
+
+Includes the Adaptive Momentum strategy indicators: RSI(5), MACD(8-17-9),
+EMA(8/21), VWAP, ATR(14), volume ratio, and daily MACD filter.
+"""
 
 from __future__ import annotations
 
@@ -61,6 +65,11 @@ def atr(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14) 
     return true_range.ewm(alpha=1 / period, min_periods=period).mean()
 
 
+def sma(series: pd.Series, period: int) -> pd.Series:
+    """Simple Moving Average."""
+    return series.rolling(window=period).mean()
+
+
 def volume_sma(volumes: pd.Series, period: int = 20) -> pd.Series:
     """Simple moving average of volume."""
     return volumes.rolling(window=period).mean()
@@ -90,18 +99,38 @@ def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
 
+def macd_crossover(macd_line: pd.Series, signal_line: pd.Series) -> pd.Series:
+    """True on bars where MACD crosses above signal (bullish crossover)."""
+    prev_macd = macd_line.shift(1)
+    prev_signal = signal_line.shift(1)
+    return (prev_macd <= prev_signal) & (macd_line > signal_line)
+
+
+def macd_crossunder(macd_line: pd.Series, signal_line: pd.Series) -> pd.Series:
+    """True on bars where MACD crosses below signal (bearish crossover)."""
+    prev_macd = macd_line.shift(1)
+    prev_signal = signal_line.shift(1)
+    return (prev_macd >= prev_signal) & (macd_line < signal_line)
+
+
 def compute_all(bars: list[dict]) -> dict[str, float | None]:
     """Compute all indicators from a list of OHLCV bar dicts.
 
     Returns latest values for each indicator, or None if insufficient data.
+    Includes Adaptive Momentum strategy indicators: RSI(5), MACD(8-17-9),
+    EMA(8/21), volume ratio, and crossover states.
     """
     if len(bars) < 30:
         return {
-            "rsi": None, "macd_line": None, "macd_signal": None, "macd_hist": None,
+            "rsi": None, "rsi_5": None,
+            "macd_line": None, "macd_signal": None, "macd_hist": None,
+            "macd_4h_line": None, "macd_4h_signal": None, "macd_4h_hist": None,
+            "macd_4h_bullish_cross": False, "macd_4h_bearish_cross": False,
             "bb_upper": None, "bb_middle": None, "bb_lower": None,
             "vwap": None, "atr": None, "volume_sma": None,
             "williams_r": None, "ema_9": None, "ema_21": None,
             "momentum_5": None, "momentum_10": None,
+            "vol_ratio_20": None,
         }
 
     df = pd.DataFrame(bars)
@@ -110,8 +139,15 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
     lows = df["low"].astype(float)
     volumes = df["volume"].astype(float)
 
-    rsi_val = rsi(closes)
+    rsi_14 = rsi(closes, 14)
+    rsi_5 = rsi(closes, 5)
+
     macd_l, macd_s, macd_h = macd(closes)
+
+    macd_4h_l, macd_4h_s, macd_4h_h = macd(closes, fast=8, slow=17, signal=9)
+    macd_4h_bull = macd_crossover(macd_4h_l, macd_4h_s)
+    macd_4h_bear = macd_crossunder(macd_4h_l, macd_4h_s)
+
     bb_u, bb_m, bb_lo = bollinger_bands(closes)
     vwap_val = vwap(highs, lows, closes, volumes)
     atr_val = atr(highs, lows, closes)
@@ -132,15 +168,29 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
 
     atr_sma_20 = atr_val.rolling(window=20).mean()
 
+    vol_ratio = volumes / vol_sma_val
+
+    sma_200 = sma(closes, min(200, len(closes)))
+
     def _last(series: pd.Series) -> float | None:
         val = series.iloc[-1]
         return float(val) if pd.notna(val) else None
 
+    def _last_bool(series: pd.Series) -> bool:
+        val = series.iloc[-1]
+        return bool(val) if pd.notna(val) else False
+
     return {
-        "rsi": _last(rsi_val),
+        "rsi": _last(rsi_14),
+        "rsi_5": _last(rsi_5),
         "macd_line": _last(macd_l),
         "macd_signal": _last(macd_s),
         "macd_hist": _last(macd_h),
+        "macd_4h_line": _last(macd_4h_l),
+        "macd_4h_signal": _last(macd_4h_s),
+        "macd_4h_hist": _last(macd_4h_h),
+        "macd_4h_bullish_cross": _last_bool(macd_4h_bull),
+        "macd_4h_bearish_cross": _last_bool(macd_4h_bear),
         "bb_upper": _last(bb_u),
         "bb_middle": _last(bb_m),
         "bb_lower": _last(bb_lo),
@@ -148,6 +198,7 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
         "atr": _last(atr_val),
         "atr_sma_20": _last(atr_sma_20),
         "volume_sma": _last(vol_sma_val),
+        "vol_ratio_20": _last(vol_ratio),
         "close": float(closes.iloc[-1]),
         "high": float(highs.iloc[-1]),
         "low": float(lows.iloc[-1]),
@@ -159,6 +210,7 @@ def compute_all(bars: list[dict]) -> dict[str, float | None]:
         "ema_21": _last(ema_21),
         "ema_34": _last(ema_34),
         "ema_55": _last(ema_55),
+        "sma_200": _last(sma_200),
         "momentum_5": _last(mom_5),
         "momentum_10": _last(mom_10),
         "momentum_20": _last(mom_20),

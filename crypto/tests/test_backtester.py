@@ -52,35 +52,39 @@ def _make_mean_reverting_bars(n: int = 200, center: float = 100) -> list[dict]:
     return bars
 
 
+STRATEGY_NAME = "adaptive_momentum"
+STRATEGY_FN = ALL_STRATEGIES[STRATEGY_NAME]
+
+
 class TestBacktestStrategy:
     def test_insufficient_bars_returns_zero_trades(self):
         bars = _make_trending_bars(20)
-        result = backtest_strategy("momentum_cascade", ALL_STRATEGIES["momentum_cascade"], bars)
+        result = backtest_strategy(STRATEGY_NAME, STRATEGY_FN, bars)
         assert result.total_trades == 0
 
     def test_trending_market_produces_trades(self):
         bars = _make_trending_bars(200)
-        result = backtest_strategy("momentum_cascade", ALL_STRATEGIES["momentum_cascade"], bars)
+        result = backtest_strategy(STRATEGY_NAME, STRATEGY_FN, bars)
         assert result.total_trades >= 0
         assert isinstance(result.win_rate, float)
         assert isinstance(result.sharpe, float)
 
     def test_mean_reverting_market_produces_trades(self):
         bars = _make_mean_reverting_bars(200)
-        result = backtest_strategy("mean_reversion_zscore", ALL_STRATEGIES["mean_reversion_zscore"], bars)
+        result = backtest_strategy(STRATEGY_NAME, STRATEGY_FN, bars)
         assert isinstance(result.total_trades, int)
 
     def test_result_fields_valid(self):
         bars = _make_trending_bars(200)
-        result = backtest_strategy("ema_ribbon", ALL_STRATEGIES["ema_ribbon"], bars)
-        assert result.name == "ema_ribbon"
+        result = backtest_strategy(STRATEGY_NAME, STRATEGY_FN, bars)
+        assert result.name == STRATEGY_NAME
         assert 0 <= result.win_rate <= 1.0
         assert result.wins + result.losses == result.total_trades
         assert result.max_drawdown_pct >= 0
 
     def test_to_dict(self):
         bars = _make_trending_bars(200)
-        result = backtest_strategy("volatility_breakout", ALL_STRATEGIES["volatility_breakout"], bars)
+        result = backtest_strategy(STRATEGY_NAME, STRATEGY_FN, bars)
         d = result.to_dict()
         assert "name" in d
         assert "sharpe" in d
@@ -131,7 +135,7 @@ class TestComputeStrategyWeights:
             StrategyResult(name="tiny", sharpe=0.01),
         ]
         weights = compute_strategy_weights(results)
-        assert weights["tiny"] >= 0.04  # close to 5% min
+        assert weights["tiny"] >= 0.04
 
     def test_single_strategy(self):
         results = [StrategyResult(name="only", sharpe=1.0)]

@@ -1,7 +1,8 @@
 """OrderExecutorAgent — submits orders to Coinbase, monitors fills, records to DB.
 
-Now bot_id-aware: each trade and position is tagged with the originating bot
-so SwingSniper and DaySniper positions don't interfere with each other.
+Bot_id-aware: each trade and position is tagged with the originating bot.
+For the momentum trader, entries use limit orders (post_only=true for maker fees)
+with bracket TP/SL.  Falls back to market orders if limit doesn't fill within 60s.
 """
 
 from __future__ import annotations
@@ -82,15 +83,40 @@ class OrderExecutorAgent(BaseAgent):
         if qty <= 0:
             return {"status": "skip", "reason": "zero qty"}
 
+        use_limit = bot_id == "momentum" and target_price and stop_price
+
         try:
-            logger.info("submitting_buy", pair=pair, qty=str(qty), notional=notional, bot=bot_id)
-            order_result = await asyncio.to_thread(self._exchange.submit_market_order, pair, qty, "BUY")
+            logger.info(
+                "submitting_buy", pair=pair, qty=str(qty),
+                notional=notional, bot=bot_id,
+                order_type="limit+bracket" if use_limit else "market",
+            )
+
+            if use_limit:
+                order_result = await self._try_limit_buy(
+                    pair, qty, price, target_price, stop_price, bot_id,
+                )
+            else:
+                order_result = await asyncio.to_thread(
+                    self._exchange.submit_market_order, pair, qty, "BUY",
+                )
+
             self.think(f"[{bot_id}] Order submitted {pair} BUY — waiting for fill")
             fill = await self._exchange.wait_for_fill(order_result["order_id"])
 
             if fill.get("status") in ("cancelled", "expired"):
-                self.think(f"[{bot_id}] {pair} BUY order {fill.get('status')} — skipping")
-                return {"status": fill["status"], "pair": pair, "reason": f"order {fill['status']}"}
+                if use_limit:
+                    self.think(f"[{bot_id}] {pair} limit order {fill.get('status')} — fallback to market")
+                    order_result = await asyncio.to_thread(
+                        self._exchange.submit_market_order, pair, qty, "BUY",
+                    )
+                    fill = await self._exchange.wait_for_fill(order_result["order_id"])
+                    if fill.get("status") in ("cancelled", "expired"):
+                        self.think(f"[{bot_id}] {pair} BUY market fallback also {fill.get('status')}")
+                        return {"status": fill["status"], "pair": pair, "reason": f"order {fill['status']}"}
+                else:
+                    self.think(f"[{bot_id}] {pair} BUY order {fill.get('status')} — skipping")
+                    return {"status": fill["status"], "pair": pair, "reason": f"order {fill['status']}"}
 
             filled_price = fill.get("filled_avg_price", 0)
             filled_qty = fill.get("filled_qty", 0)
@@ -132,6 +158,28 @@ class OrderExecutorAgent(BaseAgent):
             self.think(f"[{bot_id}] BUY FAILED {pair}: {e}")
             await self._telegram.error_alert("Buy Failed", f"[{bot_id}] {pair}: {e}")
             return {"status": "error", "pair": pair, "error": str(e)}
+
+    async def _try_limit_buy(
+        self,
+        pair: str,
+        qty: Decimal,
+        current_price: float,
+        target_price: float,
+        stop_price: float,
+        bot_id: str,
+    ) -> dict:
+        """Attempt a limit+bracket order, fall back to plain limit if bracket fails."""
+        try:
+            return await asyncio.to_thread(
+                self._exchange.submit_bracket_order,
+                pair, qty, current_price, target_price, stop_price, True,
+            )
+        except Exception as e:
+            self.think(f"[{bot_id}] Bracket order unavailable ({e}), using limit only")
+            return await asyncio.to_thread(
+                self._exchange.submit_limit_order,
+                pair, qty, "BUY", current_price, True,
+            )
 
     async def _execute_sell(self, pair: str, confidence: float, reasoning: str, bot_id: str) -> dict:
         """Sell the bot's position for a pair."""

@@ -473,6 +473,129 @@ class CoinbaseCryptoService:
             "submitted_at": datetime.now(timezone.utc),
         }
 
+    def submit_limit_order(
+        self,
+        pair: str,
+        qty: Decimal,
+        side: str,
+        limit_price: float,
+        post_only: bool = True,
+    ) -> dict[str, Any]:
+        """Submit a limit GTC order with optional post_only for maker fees."""
+        self._require_auth()
+        product_id = _to_product_id(pair)
+        client_order_id = str(uuid.uuid4())
+        qty = self._quantize_qty(pair, qty)
+        if qty <= 0:
+            raise RuntimeError(f"Order qty too small after rounding for {pair}")
+
+        order_config = {
+            "limit_limit_gtc": {
+                "base_size": str(qty),
+                "limit_price": f"{limit_price:.2f}",
+                "post_only": post_only,
+            }
+        }
+
+        raw = self._to_dict(self._auth.create_order(
+            client_order_id=client_order_id,
+            product_id=product_id,
+            side=side.upper(),
+            order_configuration=order_config,
+        ))
+
+        success = raw.get("success", False)
+        success_resp = raw.get("success_response", {}) or {}
+        error_resp = raw.get("error_response", {}) or {}
+        order_id = success_resp.get("order_id", "") or raw.get("order_id", client_order_id)
+
+        if not success:
+            error_msg = error_resp.get("message", "") or error_resp.get("error", "") or str(raw)
+            raise RuntimeError(f"Coinbase limit order failed: {error_msg}")
+
+        logger.info(
+            "limit_order_submitted", pair=pair, side=side,
+            qty=str(qty), limit_price=f"${limit_price:,.2f}",
+            post_only=post_only, order_id=order_id,
+        )
+
+        return {
+            "order_id": order_id,
+            "status": "pending",
+            "filled_qty": 0,
+            "filled_avg_price": 0,
+            "submitted_at": datetime.now(timezone.utc),
+        }
+
+    def submit_bracket_order(
+        self,
+        pair: str,
+        qty: Decimal,
+        entry_price: float,
+        tp_price: float,
+        sl_price: float,
+        post_only: bool = True,
+    ) -> dict[str, Any]:
+        """Submit a limit BUY with attached bracket TP/SL (trigger_bracket_gtc)."""
+        self._require_auth()
+        product_id = _to_product_id(pair)
+        client_order_id = str(uuid.uuid4())
+        qty = self._quantize_qty(pair, qty)
+        if qty <= 0:
+            raise RuntimeError(f"Order qty too small after rounding for {pair}")
+
+        order_config = {
+            "limit_limit_gtc": {
+                "base_size": str(qty),
+                "limit_price": f"{entry_price:.2f}",
+                "post_only": post_only,
+            }
+        }
+
+        attached_order_config = {
+            "trigger_bracket_gtc": {
+                "limit_price": f"{tp_price:.2f}",
+                "stop_trigger_price": f"{sl_price:.2f}",
+            }
+        }
+
+        try:
+            raw = self._to_dict(self._auth.create_order(
+                client_order_id=client_order_id,
+                product_id=product_id,
+                side="BUY",
+                order_configuration=order_config,
+                attached_order_configuration=attached_order_config,
+            ))
+        except TypeError:
+            logger.warning("bracket_order_not_supported_by_sdk", pair=pair)
+            return self.submit_limit_order(pair, qty, "BUY", entry_price, post_only)
+
+        success = raw.get("success", False)
+        success_resp = raw.get("success_response", {}) or {}
+        error_resp = raw.get("error_response", {}) or {}
+        order_id = success_resp.get("order_id", "") or raw.get("order_id", client_order_id)
+
+        if not success:
+            error_msg = error_resp.get("message", "") or error_resp.get("error", "") or str(raw)
+            logger.warning("bracket_order_failed_fallback_limit", error=error_msg)
+            return self.submit_limit_order(pair, qty, "BUY", entry_price, post_only)
+
+        logger.info(
+            "bracket_order_submitted", pair=pair,
+            qty=str(qty), entry=f"${entry_price:,.2f}",
+            tp=f"${tp_price:,.2f}", sl=f"${sl_price:,.2f}",
+            order_id=order_id,
+        )
+
+        return {
+            "order_id": order_id,
+            "status": "pending",
+            "filled_qty": 0,
+            "filled_avg_price": 0,
+            "submitted_at": datetime.now(timezone.utc),
+        }
+
     def get_order(self, order_id: str) -> dict[str, Any]:
         self._require_auth()
         raw = self._to_dict(self._auth.get_order(order_id))

@@ -1,4 +1,4 @@
-"""Alpha-Paca Crypto — two-bot AI trading system with SwingSniper + DaySniper."""
+"""Alpha-Paca Crypto — Adaptive Momentum + News Alpha trading system."""
 
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ import sqlalchemy
 from sqlalchemy import select
 
 from agents.base import set_healer, set_state_ref
-from agents.day_sniper import DaySniperAgent
 from agents.healer import HealerAgent
+from agents.momentum_trader import MomentumTraderAgent
 from agents.news_scout import NewsScoutAgent
 from agents.order_executor import OrderExecutorAgent
 from agents.risk_guard import RiskGuard
@@ -35,8 +35,9 @@ from config import get_settings
 from db.engine import Base, async_session_factory, engine
 from db.models import CryptoPortfolioState, CryptoPosition, CryptoTrade
 from display import build_full_display
+from engine.exit_manager import ExitManager
 from engine.indicators import compute_all
-from engine.leverage_sizer import compute_leverage_size, get_loss_tracker
+from engine.leverage_sizer import compute_position_size, compute_leverage_size, get_loss_tracker
 from engine.regime import detect_regime
 from engine.trade_journal import log_decision
 from services.coinbase_crypto import CoinbaseCryptoService
@@ -73,8 +74,8 @@ _state: dict[str, Any] = {
     "news_data": {},
     "recent_trades": [],
     "agent_statuses": {
+        "momentum": "idle",
         "swing_sniper": "idle",
-        "day_sniper": "idle",
         "order_executor": "idle",
         "news_scout": "idle",
     },
@@ -96,13 +97,17 @@ _state: dict[str, Any] = {
     "onchain": {},
     "indicators_5m": {},
     "indicators_4h": {},
+    "indicators_daily": {},
+    "composite_scores": {},
     "candles_5m": {},
     "candles_1m": {},
     "candles_4h": {},
+    "candles_daily": {},
 }
 
 _exchange_ref: CoinbaseCryptoService | None = None
 _risk_guard: RiskGuard | None = None
+_exit_manager: ExitManager | None = None
 
 
 def get_exchange() -> CoinbaseCryptoService | None:
@@ -154,6 +159,12 @@ async def update_trading_settings(new_settings: dict) -> dict[str, str]:
         "max_capital", "pairs", "max_risk_per_trade_pct", "max_leverage",
         "min_conviction", "daily_loss_halt_pct", "max_drawdown_pct",
         "max_concurrent_per_bot", "max_concurrent_total",
+        "composite_buy_threshold", "composite_exit_threshold",
+        "atr_stop_multiplier", "atr_tp_multiplier",
+        "macd_fast", "macd_slow", "macd_signal", "rsi_period",
+        "ema_fast", "ema_slow",
+        "trading_hours_start", "trading_hours_end", "primary_window_end",
+        "momentum_eval_interval_sec", "news_poll_interval_sec",
         "day_min_rr_ratio", "day_min_trade_interval_sec", "day_max_hold_hours",
         "day_eval_interval_sec", "swing_min_rr_ratio", "swing_min_trade_interval_sec",
         "swing_eval_interval_sec", "cooldown_after_losses", "cooldown_halt_after_losses",
@@ -397,6 +408,19 @@ async def tick_15s(
                 except Exception as e:
                     logger.warning("bars_4h_fetch_error", pair=pair, error=str(e))
 
+            # Daily candles for the MACD regime filter
+            for pair in settings.crypto.pair_list:
+                try:
+                    bars_daily = await asyncio.to_thread(
+                        exchange.get_bars, pair, granularity="ONE_DAY", lookback_minutes=250 * 24 * 60,
+                    )
+                    if len(bars_daily) >= 30:
+                        ind = compute_all(bars_daily)
+                        _state["indicators_daily"][pair] = ind
+                        _state["candles_daily"][pair] = bars_daily[-250:]
+                except Exception as e:
+                    logger.warning("bars_daily_fetch_error", pair=pair, error=str(e))
+
             # Regime detection on hourly candles
             try:
                 first_pair = settings.crypto.pair_list[0]
@@ -440,14 +464,14 @@ async def tick_15s(
         await asyncio.sleep(15)
 
 
-async def tick_day_sniper(
-    day_bot: DaySniperAgent,
+async def tick_momentum_trader(
+    momentum_bot: MomentumTraderAgent,
     risk_guard: RiskGuard,
     executor: OrderExecutorAgent,
-    price_tracker: PriceTracker,
+    exit_manager: ExitManager,
     exchange: CoinbaseCryptoService,
 ) -> None:
-    """DaySniper evaluates entries/exits every 30 seconds."""
+    """Adaptive Momentum evaluates entries every 60s using 4H composite scoring."""
     await asyncio.sleep(20)
     settings = get_settings()
     while not _shutdown.is_set():
@@ -455,27 +479,29 @@ async def tick_day_sniper(
             positions = _state.get("positions", [])
             portfolio = _state.get("portfolio", {})
 
-            result = await day_bot.safe_run(
-                indicators=_state.get("indicators_5m", {}),
-                regime=_state.get("regime", {}),
+            result = await momentum_bot.safe_run(
+                indicators_4h=_state.get("indicators_4h", {}),
+                indicators_daily=_state.get("indicators_daily", {}),
+                news_data=_state.get("news_data", {}),
+                onchain=_state.get("onchain", {}),
+                microstructure={},
                 positions=positions,
                 portfolio=portfolio,
-                candles_5m=_state.get("candles_5m", {}),
-                candles_1m=_state.get("candles_1m", {}),
                 prices=_state.get("prices", {}),
             )
 
             all_decisions = result.get("all_decisions", [])
             for d in all_decisions:
+                _state["composite_scores"][d.get("pair", "")] = d.get("composite_score", 0)
                 price_data = _state.get("prices", {}).get(d.get("pair", ""), {})
                 mid_price = price_data.get("mid", 0)
                 await log_decision(
-                    bot_id="day", pair=d["pair"], action=d["action"],
+                    bot_id="momentum", pair=d["pair"], action=d["action"],
                     conviction=d["conviction"], price_at_decision=mid_price,
                     reasoning=d.get("reasoning", ""),
                     target_price=d.get("target_price"),
                     stop_price=d.get("stop_price"),
-                    indicators=_state.get("indicators_5m", {}).get(d["pair"]),
+                    indicators=_state.get("indicators_4h", {}).get(d["pair"]),
                     regime=_state.get("regime", {}).get("label"),
                     portfolio_state=portfolio,
                     positions=positions,
@@ -484,7 +510,7 @@ async def tick_day_sniper(
             decisions = result.get("decisions", [])
             for decision in decisions:
                 pair = decision["pair"]
-                decision["bot_id"] = "day"
+                decision["bot_id"] = "momentum"
 
                 price_data = _state.get("prices", {}).get(pair, {})
                 mid_price = price_data.get("mid", 0)
@@ -493,25 +519,34 @@ async def tick_day_sniper(
 
                 decision["entry_price"] = mid_price
 
-                verdict = risk_guard.check("day", decision, positions, portfolio)
+                verdict = risk_guard.check("momentum", decision, positions, portfolio)
                 if not verdict.approved:
-                    day_bot.think(f"[day] {pair} REJECTED: {verdict.reason}")
+                    momentum_bot.think(f"[momentum] {pair} REJECTED: {verdict.reason}")
                     continue
 
-                atr = _state.get("indicators_5m", {}).get(pair, {}).get("atr")
+                atr = _state.get("indicators_4h", {}).get(pair, {}).get("atr")
                 cash = portfolio.get("cash", 0)
+                nav = portfolio.get("nav", cash)
                 cap = settings.crypto.max_capital
-                tradeable = min(cash, cap) if cap > 0 else cash
+                tradeable = min(nav, cap) if cap > 0 else nav
 
                 if decision["action"] == "BUY":
-                    sized = compute_leverage_size(
-                        pair=pair, conviction=decision["conviction"],
-                        bot_id="day", available_capital=tradeable,
-                        atr_value=atr, price=mid_price,
+                    sized = compute_position_size(
+                        pair=pair, bot_id="momentum",
+                        account_nav=tradeable,
+                        entry_price=mid_price,
+                        atr_value=atr or mid_price * 0.02,
                     )
                     if not sized:
                         continue
                     notional = sized.notional_usd
+
+                    exit_manager.register_position(
+                        pair, "momentum", mid_price,
+                        atr_value=atr or mid_price * 0.02,
+                        stop_multiplier=settings.crypto.atr_stop_multiplier,
+                        tp_multiplier=settings.crypto.atr_tp_multiplier,
+                    )
                 else:
                     notional = 0
 
@@ -520,15 +555,17 @@ async def tick_day_sniper(
                 )
 
                 if exec_result.get("status") == "filled":
-                    risk_guard.record_trade_time("day", pair)
+                    risk_guard.record_trade_time("momentum", pair)
                     pnl = exec_result.get("pnl")
                     if pnl is not None:
                         if pnl > 0:
-                            risk_guard.record_win("day")
-                            get_loss_tracker().record("day", pair, True)
+                            risk_guard.record_win("momentum")
+                            get_loss_tracker().record("momentum", pair, True)
                         else:
-                            risk_guard.record_loss("day")
-                            get_loss_tracker().record("day", pair, False)
+                            risk_guard.record_loss("momentum")
+                            get_loss_tracker().record("momentum", pair, False)
+                        if decision["action"] == "SELL":
+                            exit_manager.remove_position(pair, "momentum")
 
                     _state["recent_trades"].append({
                         "pair": pair,
@@ -536,66 +573,85 @@ async def tick_day_sniper(
                         "qty": exec_result.get("qty", 0),
                         "price": exec_result.get("price", mid_price),
                         "pnl": pnl or 0,
-                        "bot_id": "day",
+                        "bot_id": "momentum",
                         "reasoning": decision.get("reasoning", ""),
                         "opened_at": datetime.now(timezone.utc).isoformat(),
                     })
                     _state["recent_trades"] = _state["recent_trades"][-30:]
 
         except Exception as e:
-            logger.error("tick_day_sniper_error", error_msg=str(e))
+            logger.error("tick_momentum_trader_error", error_msg=str(e))
 
         try:
             from services.settings_store import save_agent_log as _sal, load_pnl_summary
             await _sal(_state.get("agent_log", []))
             _state["pnl_summary"] = await load_pnl_summary()
         except Exception as e:
-            logger.warning("day_sniper_log_save_error", error=str(e))
+            logger.warning("momentum_log_save_error", error=str(e))
 
-        await asyncio.sleep(settings.crypto.day_eval_interval_sec)
+        await asyncio.sleep(settings.crypto.momentum_eval_interval_sec)
 
 
-async def tick_day_exit_check(
+async def tick_exit_manager(
+    exit_manager: ExitManager,
     executor: OrderExecutorAgent,
     exchange: CoinbaseCryptoService,
 ) -> None:
-    """Hard stop/target check for day-trade positions every 15 seconds."""
+    """ATR trailing stop / TP / signal / time exits every 15 seconds."""
     await asyncio.sleep(25)
     settings = get_settings()
     while not _shutdown.is_set():
         try:
             positions = _state.get("positions", [])
-            for pos in positions:
-                if pos.get("bot_id") != "day":
-                    continue
-                pair = pos.get("pair", "")
-                qty = float(pos.get("qty", 0))
-                if qty <= 0 or not pair:
-                    continue
+            indicators_4h = _state.get("indicators_4h", {})
+            composite_scores = _state.get("composite_scores", {})
 
-                current_price = float(pos.get("current_price", 0))
-                entry_price = float(pos.get("avg_entry_price", 0))
+            pending_exits = exit_manager.check_exits(
+                positions=positions,
+                indicators_4h=indicators_4h,
+                composite_scores=composite_scores,
+                exit_threshold=settings.crypto.composite_exit_threshold,
+            )
 
-                # TODO: retrieve stop/target from trade record
-                # For now use percentage-based protective exits
-                if entry_price > 0 and current_price > 0:
-                    pnl_pct = (current_price - entry_price) / entry_price * 100
+            for pe in pending_exits:
+                logger.info(
+                    "exit_triggered",
+                    pair=pe.pair, bot_id=pe.bot_id,
+                    exit_type=pe.exit_type, reason=pe.reason,
+                )
+                exec_result = await executor.safe_run(
+                    decision={
+                        "action": "SELL", "pair": pe.pair, "confidence": 0.99,
+                        "reasoning": f"{pe.exit_type.upper()}: {pe.reason}",
+                        "bot_id": pe.bot_id,
+                    },
+                    price=pe.exit_price, notional=0,
+                )
+                if exec_result.get("status") == "filled":
+                    exit_manager.remove_position(pe.pair, pe.bot_id)
+                    pnl = exec_result.get("pnl")
+                    if pnl is not None:
+                        if pnl > 0:
+                            _risk_guard.record_win(pe.bot_id) if _risk_guard else None
+                            get_loss_tracker().record(pe.bot_id, pe.pair, True)
+                        else:
+                            _risk_guard.record_loss(pe.bot_id) if _risk_guard else None
+                            get_loss_tracker().record(pe.bot_id, pe.pair, False)
 
-                    # Hard stop: -3% for day trades
-                    if pnl_pct <= -3.0:
-                        await executor.safe_run(
-                            decision={
-                                "action": "SELL", "pair": pair, "confidence": 0.99,
-                                "reasoning": f"DAY STOP-LOSS: {pnl_pct:.1f}%",
-                                "bot_id": "day",
-                            },
-                            price=current_price, notional=0,
-                        )
+                    _state["recent_trades"].append({
+                        "pair": pe.pair,
+                        "side": "SELL",
+                        "qty": exec_result.get("qty", 0),
+                        "price": exec_result.get("price", pe.exit_price),
+                        "pnl": pnl or 0,
+                        "bot_id": pe.bot_id,
+                        "reasoning": pe.reason,
+                        "opened_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    _state["recent_trades"] = _state["recent_trades"][-30:]
 
-                # Force close after max hold hours
-                # Check opened_at from DB would be ideal; simplified here
         except Exception as e:
-            logger.error("tick_day_exit_error", error_msg=str(e))
+            logger.error("tick_exit_manager_error", error_msg=str(e))
         await asyncio.sleep(15)
 
 
@@ -755,32 +811,44 @@ async def tick_swing_exit_check(
         await asyncio.sleep(300)
 
 
-async def tick_news_onchain(news_agent: NewsScoutAgent) -> None:
-    """Fetch news + on-chain data every 15 minutes for swing bot."""
+async def tick_news_fast(news_agent: NewsScoutAgent) -> None:
+    """Fast news polling (every news_poll_interval_sec, default 10s)."""
+    await asyncio.sleep(10)
+    settings = get_settings()
+    while not _shutdown.is_set():
+        try:
+            news_result = await news_agent.safe_run()
+            if isinstance(news_result, dict) and "error" not in news_result:
+                _state["news_data"] = news_result
+        except Exception as e:
+            logger.error("tick_news_fast_error", error_msg=str(e))
+        await asyncio.sleep(settings.crypto.news_poll_interval_sec)
+
+
+async def tick_onchain() -> None:
+    """On-chain data (funding, OI, F&G, liquidations) every 5 minutes."""
     await asyncio.sleep(15)
     while not _shutdown.is_set():
         try:
-            news_result, onchain = await asyncio.gather(
-                news_agent.safe_run(),
-                fetch_all_onchain(),
-            )
-
-            if isinstance(news_result, dict) and "error" not in news_result:
-                _state["news_data"] = news_result
-
+            onchain = await fetch_all_onchain()
             if onchain:
                 _state["onchain"] = {
                     "fear_greed_index": onchain.fear_greed_index,
                     "fear_greed_label": onchain.fear_greed_label,
                     "btc_funding_rate": onchain.btc_funding_rate,
                     "eth_funding_rate": onchain.eth_funding_rate,
+                    "btc_oi_change_pct": onchain.btc_oi_change_pct,
+                    "oi_rising": onchain.oi_rising,
+                    "long_short_ratio": onchain.long_short_ratio,
+                    "exchange_flow_signal": onchain.exchange_flow_signal,
+                    "liquidation_cascade": onchain.liquidation_cascade,
+                    "liquidation_1h_usd": onchain.liquidation_1h_usd,
                     "signal": onchain.signal,
                     "score": onchain.score,
                 }
-
         except Exception as e:
-            logger.error("tick_news_onchain_error", error_msg=str(e))
-        await asyncio.sleep(900)
+            logger.error("tick_onchain_error", error_msg=str(e))
+        await asyncio.sleep(300)
 
 
 async def tick_1h(telegram: TelegramService, exchange: CoinbaseCryptoService) -> None:
@@ -1067,9 +1135,13 @@ async def run() -> None:
     risk_guard = RiskGuard()
     _risk_guard = risk_guard
 
+    exit_manager = ExitManager()
+    global _exit_manager
+    _exit_manager = exit_manager
+
     news_agent = NewsScoutAgent()
     swing_bot = SwingSniperAgent()
-    day_bot = DaySniperAgent()
+    momentum_bot = MomentumTraderAgent()
     executor = OrderExecutorAgent(exchange, telegram)
 
     # Reconcile PnL from Coinbase fills on startup
@@ -1102,10 +1174,13 @@ async def run() -> None:
     }
 
     await telegram.send(
-        "Alpha-Paca Crypto v2 Started (SwingSniper + DaySniper)\n"
+        "Alpha-Paca Crypto v3 Started (Adaptive Momentum + SwingSniper)\n"
         f"Pairs: {', '.join(settings.crypto.pair_list)}\n"
         f"Capital: {cap_label}\n"
-        f"Min Conviction: {settings.crypto.min_conviction}\n"
+        f"Buy Threshold: {settings.crypto.composite_buy_threshold} | "
+        f"Exit: {settings.crypto.composite_exit_threshold}\n"
+        f"Risk/Trade: {settings.crypto.max_risk_per_trade_pct}% | "
+        f"Daily Halt: {settings.crypto.daily_loss_halt_pct}%\n"
         f"Mode: LIVE"
     )
 
@@ -1137,11 +1212,12 @@ async def run() -> None:
         task_factories = {
             "heartbeat": lambda: heartbeat_loop(redis_conn),
             "tick_15s": lambda: tick_15s(price_tracker, exchange),
-            "day_sniper": lambda: tick_day_sniper(day_bot, risk_guard, executor, price_tracker, exchange),
-            "day_exit": lambda: tick_day_exit_check(executor, exchange),
+            "momentum_trader": lambda: tick_momentum_trader(momentum_bot, risk_guard, executor, exit_manager, exchange),
+            "exit_manager": lambda: tick_exit_manager(exit_manager, executor, exchange),
             "swing_sniper": lambda: tick_swing_sniper(swing_bot, risk_guard, executor, price_tracker, exchange),
             "swing_exit": lambda: tick_swing_exit_check(executor, exchange),
-            "news_onchain": lambda: tick_news_onchain(news_agent),
+            "news_fast": lambda: tick_news_fast(news_agent),
+            "onchain": lambda: tick_onchain(),
             "tick_1h": lambda: tick_1h(telegram, exchange),
             "tick_24h": lambda: tick_24h(telegram),
             "daily_backtest": lambda: tick_daily_backtest(exchange, redis_conn, telegram),
@@ -1181,7 +1257,7 @@ async def run() -> None:
     await price_tracker.close()
     await redis_conn.aclose()
     await engine.dispose()
-    await telegram.send("Alpha-Paca Crypto v2 Stopped")
+    await telegram.send("Alpha-Paca Crypto v3 Stopped")
 
 
 def main() -> None:
