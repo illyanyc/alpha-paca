@@ -164,7 +164,7 @@ async def update_trading_settings(new_settings: dict) -> dict[str, str]:
         "macd_fast", "macd_slow", "macd_signal", "rsi_period",
         "ema_fast", "ema_slow",
         "trading_hours_start", "trading_hours_end", "primary_window_end",
-        "momentum_eval_interval_sec", "news_poll_interval_sec",
+        "momentum_eval_interval_sec", "news_poll_interval_sec", "tavily_poll_interval_sec",
         "day_min_rr_ratio", "day_min_trade_interval_sec", "day_max_hold_hours",
         "day_eval_interval_sec", "swing_min_rr_ratio", "swing_min_trade_interval_sec",
         "swing_eval_interval_sec", "cooldown_after_losses", "cooldown_halt_after_losses",
@@ -812,7 +812,7 @@ async def tick_swing_exit_check(
 
 
 async def tick_news_fast(news_agent: NewsScoutAgent) -> None:
-    """Fast news polling (every news_poll_interval_sec, default 10s)."""
+    """News polling (every news_poll_interval_sec, default 5min; Tavily hourly)."""
     await asyncio.sleep(10)
     settings = get_settings()
     while not _shutdown.is_set():

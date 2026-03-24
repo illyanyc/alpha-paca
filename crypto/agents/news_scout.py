@@ -1,9 +1,10 @@
-"""NewsScoutAgent — fast crypto news scanner with LLM sentiment classification.
+"""NewsScoutAgent — crypto news scanner with LLM sentiment classification.
 
 Optimized for the Adaptive Momentum strategy:
-  - Polls Serper/Tavily every 10 seconds (configurable)
+  - Serper headlines every 5 min (configurable via news_poll_interval_sec)
+  - Tavily deep search every 1 hour (configurable via tavily_poll_interval_sec)
   - Uses claude-3-5-haiku for fast classification (<200ms)
-  - Caches sentiment in Redis with 60s TTL for momentum_trader re-use
+  - Caches sentiment in Redis with 5 min TTL for momentum_trader re-use
   - Urgency fast-path: hack/exploit/listing news triggers immediate flag
 """
 
@@ -26,7 +27,7 @@ logger = structlog.get_logger(__name__)
 
 SKILL_PATH = Path(__file__).parent.parent / "skills" / "crypto_news_analysis.md"
 NEWS_CACHE_KEY = "crypto:news:sentiment"
-NEWS_CACHE_TTL = 60
+NEWS_CACHE_TTL = 300
 
 URGENT_KEYWORDS_BEARISH = [
     "hack", "exploit", "rug pull", "security breach", "stolen",

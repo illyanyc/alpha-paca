@@ -68,6 +68,9 @@ class NewsClient:
         self._tavily_key = settings.api_keys.tavily_api_key
         self._serper_circuit = _ApiCircuit("serper")
         self._tavily_circuit = _ApiCircuit("tavily")
+        self._tavily_cache: dict[str, list[dict]] = {}
+        self._tavily_last_fetch: float = 0
+        self._tavily_interval: float = float(settings.crypto.tavily_poll_interval_sec)
 
     async def search_serper(self, query: str, num: int = 10) -> list[dict]:
         """Search Serper News API for crypto headlines."""
@@ -132,7 +135,12 @@ class NewsClient:
             return []
 
     async def fetch_crypto_news(self, pairs: list[str]) -> dict[str, list[dict]]:
-        """Aggregate news for each crypto pair + general market."""
+        """Aggregate news for each crypto pair + general market.
+
+        Serper is called every poll cycle for fast headlines.
+        Tavily is called at most once per tavily_poll_interval_sec (default 1h)
+        and cached results are reused in between.
+        """
         all_news: dict[str, list[dict]] = {}
 
         queries = ["crypto market news today", "cryptocurrency regulation news"]
@@ -140,9 +148,29 @@ class NewsClient:
             coin = pair.split("/")[0]
             queries.append(f"{coin} cryptocurrency news")
 
+        now = time.monotonic()
+        tavily_fresh = (now - self._tavily_last_fetch) >= self._tavily_interval
+
+        if tavily_fresh:
+            self._tavily_cache.clear()
+
         for query in queries:
             serper_results = await self.search_serper(query, num=5)
-            tavily_results = await self.search_tavily(query, max_results=3)
+
+            if tavily_fresh:
+                tavily_results = await self.search_tavily(query, max_results=3)
+                self._tavily_cache[query] = tavily_results
+            else:
+                tavily_results = self._tavily_cache.get(query, [])
+
             all_news[query] = serper_results + tavily_results
+
+        if tavily_fresh:
+            self._tavily_last_fetch = now
+            logger.info(
+                "tavily_fetched",
+                queries=len(queries),
+                next_fetch_in_sec=int(self._tavily_interval),
+            )
 
         return all_news

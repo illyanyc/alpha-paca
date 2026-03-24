@@ -73,7 +73,8 @@ class CryptoTradingSettings(BaseSettings):
     primary_window_end: int = 17
     # Momentum trader
     momentum_eval_interval_sec: int = 60
-    news_poll_interval_sec: int = 10
+    news_poll_interval_sec: int = 300
+    tavily_poll_interval_sec: int = 3600
     # Day bot (legacy, kept for backward compat)
     day_min_rr_ratio: float = 1.5
     day_min_trade_interval_sec: int = 300
