@@ -167,7 +167,7 @@ async def update_trading_settings(new_settings: dict) -> dict[str, str]:
         "macd_fast", "macd_slow", "macd_signal", "rsi_period",
         "ema_fast", "ema_slow",
         "trading_hours_start", "trading_hours_end", "primary_window_end",
-        "momentum_eval_interval_sec", "news_poll_interval_sec", "tavily_poll_interval_sec",
+        "momentum_eval_interval_sec", "news_poll_interval_sec", "article_scrape_interval_sec",
         "day_min_rr_ratio", "day_min_trade_interval_sec", "day_max_hold_hours",
         "day_eval_interval_sec", "swing_min_rr_ratio", "swing_min_trade_interval_sec",
         "swing_eval_interval_sec", "cooldown_after_losses", "cooldown_halt_after_losses",
@@ -882,7 +882,7 @@ async def run_rebalance() -> dict[str, Any]:
     if news_agent:
         try:
             news_agent._last_poll_time = 0
-            news_agent._news_client._tavily_last_fetch = 0
+            news_agent._news_client._scrape_last_fetch = 0
             news_data = await news_agent.safe_run()
             if isinstance(news_data, dict) and "error" not in news_data:
                 _state["news_data"] = news_data

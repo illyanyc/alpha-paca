@@ -21,7 +21,6 @@ class APIKeySettings(BaseSettings):
         env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore",
     )
     serper_api_key: str = Field("", alias="SERPER_API_KEY")
-    tavily_api_key: str = Field("", alias="TAVILY_API_KEY")
     anthropic_api_key: str = Field("", alias="ANTHROPIC_API_KEY")
 
 
@@ -74,7 +73,7 @@ class CryptoTradingSettings(BaseSettings):
     # Momentum trader
     momentum_eval_interval_sec: int = 60
     news_poll_interval_sec: int = 300
-    tavily_poll_interval_sec: int = 3600
+    article_scrape_interval_sec: int = 3600
     # Day bot (legacy, kept for backward compat)
     day_min_rr_ratio: float = 1.5
     day_min_trade_interval_sec: int = 300

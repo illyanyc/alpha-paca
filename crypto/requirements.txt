@@ -32,6 +32,9 @@ python-telegram-bot>=21.0
 # Scheduling
 apscheduler>=3.10
 
+# Article scraping (Tavily replacement)
+trafilatura>=2.0
+
 # AI
 anthropic>=0.40
 

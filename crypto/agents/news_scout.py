@@ -2,7 +2,7 @@
 
 Optimized for the Adaptive Momentum strategy:
   - Serper headlines every 5 min (configurable via news_poll_interval_sec)
-  - Tavily deep search every 1 hour (configurable via tavily_poll_interval_sec)
+  - Full-text scraping via trafilatura every 1 hour (configurable via article_scrape_interval_sec)
   - Uses claude-3-5-haiku for fast classification (<200ms)
   - Caches sentiment in Redis with 5 min TTL for momentum_trader re-use
   - Urgency fast-path: hack/exploit/listing news triggers immediate flag
