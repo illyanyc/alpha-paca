@@ -108,6 +108,9 @@ _state: dict[str, Any] = {
 _exchange_ref: CoinbaseCryptoService | None = None
 _risk_guard: RiskGuard | None = None
 _exit_manager: ExitManager | None = None
+_momentum_bot: MomentumTraderAgent | None = None
+_news_agent: NewsScoutAgent | None = None
+_executor: OrderExecutorAgent | None = None
 
 
 def get_exchange() -> CoinbaseCryptoService | None:
@@ -851,6 +854,227 @@ async def tick_onchain() -> None:
         await asyncio.sleep(300)
 
 
+async def run_rebalance() -> dict[str, Any]:
+    """On-demand rebalance: pull fresh data, score all pairs, execute qualifying trades.
+
+    Called from the dashboard Rebalance button. Returns a summary dict.
+    """
+    exchange = _exchange_ref
+    momentum_bot = _momentum_bot
+    news_agent = _news_agent
+    risk_guard = _risk_guard
+    executor = _executor
+    exit_mgr = _exit_manager
+
+    if not exchange or not exchange.is_authenticated:
+        return {"status": "error", "message": "Exchange not connected"}
+    if not momentum_bot or not executor or not risk_guard:
+        return {"status": "error", "message": "Trading agents not initialized"}
+
+    settings = get_settings()
+    pairs = settings.crypto.pair_list
+    results: list[dict[str, Any]] = []
+
+    logger.info("rebalance_started", pairs=len(pairs))
+
+    # 1) Fresh news (force Tavily refresh)
+    news_data: dict = {}
+    if news_agent:
+        try:
+            news_agent._last_poll_time = 0
+            news_agent._news_client._tavily_last_fetch = 0
+            news_data = await news_agent.safe_run()
+            if isinstance(news_data, dict) and "error" not in news_data:
+                _state["news_data"] = news_data
+        except Exception as e:
+            logger.warning("rebalance_news_error", error=str(e))
+
+    # 2) Fresh on-chain data
+    try:
+        from services.onchain_client import OnchainClient
+        oc = OnchainClient()
+        onchain = await oc.fetch()
+        _state["onchain"] = {
+            "fear_greed_index": onchain.fear_greed_index,
+            "fear_greed_label": onchain.fear_greed_label,
+            "btc_funding_rate": onchain.btc_funding_rate,
+            "btc_oi_change_pct": onchain.btc_oi_change_pct,
+            "oi_rising": onchain.oi_rising,
+            "long_short_ratio": onchain.long_short_ratio,
+            "exchange_flow_signal": onchain.exchange_flow_signal,
+            "liquidation_cascade": onchain.liquidation_cascade,
+            "liquidation_1h_usd": onchain.liquidation_1h_usd,
+            "signal": onchain.signal,
+            "score": onchain.score,
+        }
+    except Exception as e:
+        logger.warning("rebalance_onchain_error", error=str(e))
+
+    # 3) Fresh technicals for all pairs
+    for pair in pairs:
+        try:
+            bars_4h = await asyncio.to_thread(
+                exchange.get_bars, pair, granularity="FOUR_HOUR", lookback_minutes=30 * 24 * 60,
+            )
+            if len(bars_4h) >= 30:
+                ind = compute_all(bars_4h)
+                _state["indicators_4h"][pair] = ind
+                _state["candles_4h"][pair] = bars_4h[-120:]
+        except Exception as e:
+            logger.warning("rebalance_4h_error", pair=pair, error=str(e))
+
+        try:
+            bars_daily = await asyncio.to_thread(
+                exchange.get_bars, pair, granularity="ONE_DAY", lookback_minutes=250 * 24 * 60,
+            )
+            if len(bars_daily) >= 30:
+                ind = compute_all(bars_daily)
+                _state["indicators_daily"][pair] = ind
+        except Exception as e:
+            logger.warning("rebalance_daily_error", pair=pair, error=str(e))
+
+    # 4) Fresh prices + portfolio
+    try:
+        portfolio = await get_portfolio_state(exchange)
+        _state["portfolio"] = portfolio
+        raw_pos = await asyncio.to_thread(exchange.get_positions)
+        enriched = await enrich_positions(raw_pos)
+        _state["positions"] = enriched
+    except Exception as e:
+        logger.warning("rebalance_portfolio_error", error=str(e))
+
+    positions = _state.get("positions", [])
+    portfolio = _state.get("portfolio", {})
+
+    # 5) Run momentum evaluation on all pairs
+    try:
+        result = await momentum_bot.safe_run(
+            indicators_4h=_state.get("indicators_4h", {}),
+            indicators_daily=_state.get("indicators_daily", {}),
+            news_data=_state.get("news_data", {}),
+            onchain=_state.get("onchain", {}),
+            microstructure={},
+            positions=positions,
+            portfolio=portfolio,
+            prices=_state.get("prices", {}),
+        )
+    except Exception as e:
+        logger.error("rebalance_eval_error", error=str(e))
+        return {"status": "error", "message": f"Evaluation failed: {e}"}
+
+    all_decisions = result.get("all_decisions", [])
+    for d in all_decisions:
+        _state["composite_scores"][d.get("pair", "")] = d.get("composite_score", 0)
+        results.append({
+            "pair": d.get("pair", ""),
+            "action": d.get("action", "HOLD"),
+            "composite_score": d.get("composite_score", 0),
+            "conviction": d.get("conviction", 0),
+            "reasoning": d.get("reasoning", ""),
+        })
+
+    # 6) Execute qualifying trades
+    trades_executed: list[dict[str, Any]] = []
+    decisions = result.get("decisions", [])
+    for decision in decisions:
+        pair = decision["pair"]
+        decision["bot_id"] = "momentum"
+
+        price_data = _state.get("prices", {}).get(pair, {})
+        mid_price = price_data.get("mid", 0)
+        if mid_price <= 0:
+            continue
+
+        decision["entry_price"] = mid_price
+
+        verdict = risk_guard.check("momentum", decision, positions, portfolio)
+        if not verdict.approved:
+            for r in results:
+                if r["pair"] == pair:
+                    r["rejected"] = verdict.reason
+            continue
+
+        atr = _state.get("indicators_4h", {}).get(pair, {}).get("atr")
+        cash = portfolio.get("cash", 0)
+        nav = portfolio.get("nav", cash)
+        cap = settings.crypto.max_capital
+        tradeable = min(nav, cap) if cap > 0 else nav
+
+        notional = 0.0
+        if decision["action"] == "BUY":
+            sized = compute_position_size(
+                pair=pair, bot_id="momentum",
+                account_nav=tradeable,
+                entry_price=mid_price,
+                atr_value=atr or mid_price * 0.02,
+            )
+            if not sized:
+                continue
+            notional = sized.notional_usd
+
+            if exit_mgr:
+                exit_mgr.register_position(
+                    pair, "momentum", mid_price,
+                    atr_value=atr or mid_price * 0.02,
+                    stop_multiplier=settings.crypto.atr_stop_multiplier,
+                    tp_multiplier=settings.crypto.atr_tp_multiplier,
+                )
+
+        exec_result = await executor.safe_run(
+            decision=decision, price=mid_price, notional=notional,
+        )
+
+        trade_record = {
+            "pair": pair,
+            "action": decision["action"],
+            "status": exec_result.get("status", "unknown"),
+            "price": exec_result.get("price", mid_price),
+            "qty": exec_result.get("qty", 0),
+            "notional": notional,
+        }
+
+        if exec_result.get("status") == "filled":
+            risk_guard.record_trade_time("momentum", pair)
+            pnl = exec_result.get("pnl")
+            trade_record["pnl"] = pnl
+            if pnl is not None:
+                if pnl > 0:
+                    risk_guard.record_win("momentum")
+                    get_loss_tracker().record("momentum", pair, True)
+                else:
+                    risk_guard.record_loss("momentum")
+                    get_loss_tracker().record("momentum", pair, False)
+                if decision["action"] == "SELL" and exit_mgr:
+                    exit_mgr.remove_position(pair, "momentum")
+
+            _state["recent_trades"].append({
+                "pair": pair,
+                "side": exec_result.get("side"),
+                "qty": exec_result.get("qty", 0),
+                "price": exec_result.get("price", mid_price),
+                "pnl": pnl or 0,
+                "bot_id": "momentum",
+                "reasoning": decision.get("reasoning", ""),
+                "opened_at": datetime.now(timezone.utc).isoformat(),
+            })
+            _state["recent_trades"] = _state["recent_trades"][-30:]
+
+        trades_executed.append(trade_record)
+
+    logger.info(
+        "rebalance_complete",
+        pairs_evaluated=len(all_decisions),
+        trades_executed=len(trades_executed),
+    )
+
+    return {
+        "status": "ok",
+        "pairs_evaluated": len(all_decisions),
+        "scores": results,
+        "trades_executed": trades_executed,
+    }
+
+
 async def tick_1h(telegram: TelegramService, exchange: CoinbaseCryptoService) -> None:
     await asyncio.sleep(60)
     while not _shutdown.is_set():
@@ -1139,10 +1363,14 @@ async def run() -> None:
     global _exit_manager
     _exit_manager = exit_manager
 
+    global _momentum_bot, _news_agent, _executor
     news_agent = NewsScoutAgent()
     swing_bot = SwingSniperAgent()
     momentum_bot = MomentumTraderAgent()
     executor = OrderExecutorAgent(exchange, telegram)
+    _momentum_bot = momentum_bot
+    _news_agent = news_agent
+    _executor = executor
 
     # Reconcile PnL from Coinbase fills on startup
     if exchange.is_authenticated:

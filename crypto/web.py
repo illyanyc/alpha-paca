@@ -292,6 +292,20 @@ async def save_trading_settings(request: Request):
     return JSONResponse(result)
 
 
+@app.post("/api/rebalance")
+async def api_rebalance(request: Request):
+    """On-demand rebalance: pull fresh news/technicals/on-chain, score all pairs, execute qualifying trades."""
+    if not _check_session(request):
+        raise HTTPException(status_code=401)
+    try:
+        from main import run_rebalance
+        result = await run_rebalance()
+        status_code = 200 if result.get("status") == "ok" else 500
+        return JSONResponse(result, status_code=status_code)
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)[:200]}, status_code=500)
+
+
 @app.get("/api/learnings")
 async def api_learnings(request: Request):
     """View and manage prompt optimizer learnings stored in Redis."""
@@ -645,6 +659,17 @@ border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50}
 .hdr-right{display:flex;gap:6px;align-items:center;flex-shrink:0}
 .hdr-right a{font-size:11px;color:var(--dim);text-decoration:none;padding:4px 8px;border:1px solid var(--border);border-radius:4px;white-space:nowrap}
 .hdr-right a:hover{color:var(--amber);border-color:var(--amber)}
+.rebalance-link{color:var(--amber)!important;border-color:var(--amber)!important;font-weight:700}
+.rebalance-link:hover{background:var(--amber)!important;color:#000!important}
+.rebalance-link.running{opacity:.6;pointer-events:none;animation:pulse 1s infinite}
+.rebalance-toast{position:fixed;top:48px;right:12px;z-index:300;background:#131a2b;border:1px solid var(--border);
+border-radius:6px;padding:10px 14px;font-size:11px;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,.6);
+transition:opacity .3s;opacity:0;pointer-events:none}
+.rebalance-toast.show{opacity:1;pointer-events:auto}
+.rebalance-toast .rt-title{font-weight:700;color:var(--amber);margin-bottom:6px;font-size:12px}
+.rebalance-toast .rt-row{display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #1a1a1a}
+.rebalance-toast .rt-row:last-child{border:none}
+.rebalance-toast .rt-close{position:absolute;top:4px;right:8px;cursor:pointer;color:var(--dim);font-size:14px}
 .conn-badge{display:flex;align-items:center;gap:5px;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap}
 .conn-badge.ok{background:#00C85322;color:var(--green);border:1px solid #00C85344}
 .conn-badge.lost{background:#FF174422;color:var(--red);border:1px solid #FF174444}
@@ -749,6 +774,7 @@ th,td{padding:4px 6px}
 </div>
 <div class="hdr-right">
 <span id="fear-greed" style="font-size:11px;color:var(--dim)"></span>
+<a href="#" id="rebalance-btn" onclick="doRebalance(event)" class="rebalance-link">⚡ REBALANCE</a>
 <a href="/settings">⚙ SETTINGS</a>
 <a href="/logout">🚪 LOGOUT</a>
 </div>
@@ -831,6 +857,13 @@ th,td{padding:4px 6px}
 <div class="section">
 <div class="sec-hdr"><span>🧠 Agent Thinking</span></div>
 <div class="sec-body" id="thinking-log" style="max-height:300px;overflow-y:auto;font-size:11px"></div>
+</div>
+
+<!-- ── Rebalance Toast ── -->
+<div class="rebalance-toast" id="rebalance-toast">
+<span class="rt-close" onclick="$('rebalance-toast').classList.remove('show')">&times;</span>
+<div class="rt-title" id="rt-title">Rebalancing...</div>
+<div id="rt-body"></div>
 </div>
 
 <!-- ── Pair Detail Modal ── -->
@@ -1298,6 +1331,59 @@ function renderCharts(d){
         allC.forEach((c2,j)=>{if(i!==j)c2.timeScale().setVisibleLogicalRange(range);});
       });
     });
+  }
+}
+
+async function doRebalance(e){
+  e.preventDefault();
+  const btn=$('rebalance-btn');
+  const toast=$('rebalance-toast');
+  const title=$('rt-title');
+  const body=$('rt-body');
+
+  btn.classList.add('running');
+  btn.textContent='⏳ RUNNING...';
+  title.textContent='⚡ Rebalancing — pulling fresh data...';
+  body.innerHTML='<div style="color:var(--dim)">Fetching news, technicals, on-chain data and scoring all pairs...</div>';
+  toast.classList.add('show');
+
+  try{
+    const r=await fetch('/api/rebalance',{method:'POST',credentials:'same-origin'});
+    const d=await r.json();
+
+    if(d.status==='ok'){
+      title.textContent=`⚡ Rebalance Complete — ${d.pairs_evaluated} pairs scored`;
+      let html='';
+      const scores=d.scores||[];
+      scores.sort((a,b)=>b.composite_score-a.composite_score);
+      for(const s of scores){
+        const cls=s.composite_score>40?'g':s.composite_score<-20?'r':'a';
+        const act=s.action==='BUY'?'<span class="g">BUY</span>':s.action==='SELL'?'<span class="r">SELL</span>':'<span style="color:var(--dim)">HOLD</span>';
+        const rej=s.rejected?`<span class="r" style="font-size:10px"> ✗ ${s.rejected}</span>`:'';
+        html+=`<div class="rt-row"><span>${s.pair} ${act}${rej}</span><span class="${cls}">${s.composite_score>0?'+':''}${s.composite_score.toFixed(0)}</span></div>`;
+      }
+      const trades=d.trades_executed||[];
+      if(trades.length>0){
+        html+=`<div style="margin-top:6px;font-weight:700;color:var(--green);font-size:11px">${trades.length} trade(s) executed</div>`;
+        for(const t of trades){
+          const pnlStr=t.pnl!=null?` PnL: ${t.pnl>0?'+':''}$${(t.pnl||0).toFixed(2)}`:'';
+          html+=`<div class="rt-row"><span>${t.pair} ${t.action}</span><span>${t.status}${pnlStr}</span></div>`;
+        }
+      }else{
+        html+=`<div style="margin-top:6px;color:var(--dim);font-size:10px">No trades met thresholds</div>`;
+      }
+      body.innerHTML=html;
+    }else{
+      title.textContent='❌ Rebalance Failed';
+      body.innerHTML=`<div class="r">${d.message||'Unknown error'}</div>`;
+    }
+  }catch(err){
+    title.textContent='❌ Rebalance Error';
+    body.innerHTML=`<div class="r">${err.message}</div>`;
+  }finally{
+    btn.classList.remove('running');
+    btn.textContent='⚡ REBALANCE';
+    setTimeout(()=>toast.classList.remove('show'),15000);
   }
 }
 </script>
