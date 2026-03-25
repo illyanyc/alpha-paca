@@ -25,14 +25,26 @@ SESSION_MAX_AGE = 86400 * 7  # 7 days
 _state_ref: dict[str, Any] | None = None
 _start_time_ref: float | None = None
 _settings_ref: Any = None
+_run_rebalance_ref: Any = None
+_reload_keys_ref: Any = None
+_update_settings_ref: Any = None
+_get_exchange_ref: Any = None
 
 
-def init_web(state: dict, start_time: float, settings: Any) -> None:
-    """Bind shared state from the main trading loop."""
+def init_web(state: dict, start_time: float, settings: Any,
+             *, run_rebalance=None, reload_coinbase_keys=None,
+             update_trading_settings=None, get_exchange=None) -> None:
+    """Bind shared state and callbacks from the main trading loop."""
     global _state_ref, _start_time_ref, _settings_ref
+    global _run_rebalance_ref, _reload_keys_ref, _update_settings_ref
+    global _get_exchange_ref
     _state_ref = state
     _start_time_ref = start_time
     _settings_ref = settings
+    _run_rebalance_ref = run_rebalance
+    _reload_keys_ref = reload_coinbase_keys
+    _update_settings_ref = update_trading_settings
+    _get_exchange_ref = get_exchange
 
 
 def _make_session_token(password: str) -> str:
@@ -281,8 +293,9 @@ async def save_exchange_keys(request: Request):
     if not api_key or not api_secret:
         return JSONResponse({"status": "error", "error": "API key and secret are required"}, status_code=400)
 
-    from main import reload_coinbase_keys
-    result = await reload_coinbase_keys(api_key, api_secret)
+    if not _reload_keys_ref:
+        return JSONResponse({"status": "error", "error": "Service still starting"}, status_code=503)
+    result = await _reload_keys_ref(api_key, api_secret)
     status_code = 200 if result["status"] == "connected" else 400
     return JSONResponse(result, status_code=status_code)
 
@@ -294,8 +307,9 @@ async def save_trading_settings(request: Request):
         raise HTTPException(status_code=401)
     body = await request.json()
 
-    from main import update_trading_settings
-    result = await update_trading_settings(body)
+    if not _update_settings_ref:
+        return JSONResponse({"status": "error", "message": "Service still starting"}, status_code=503)
+    result = await _update_settings_ref(body)
     return JSONResponse(result)
 
 
@@ -304,9 +318,10 @@ async def api_rebalance(request: Request):
     """On-demand rebalance: pull fresh news/technicals/on-chain, score all pairs, execute qualifying trades."""
     if not _check_session(request):
         raise HTTPException(status_code=401)
+    if not _run_rebalance_ref:
+        return JSONResponse({"status": "error", "message": "Rebalance not available — service still starting"}, status_code=503)
     try:
-        from main import run_rebalance
-        result = await run_rebalance()
+        result = await _run_rebalance_ref()
         status_code = 200 if result.get("status") == "ok" else 500
         return JSONResponse(result, status_code=status_code)
     except Exception as e:
@@ -356,12 +371,12 @@ async def api_candles(request: Request, pair: str = "BTC/USD", granularity: str 
         raise HTTPException(status_code=401)
     if not _state_ref:
         return JSONResponse([])
-    from main import _exchange_ref
-    if not _exchange_ref:
+    exchange = _get_exchange_ref() if _get_exchange_ref else None
+    if not exchange:
         return JSONResponse([])
     try:
         import asyncio
-        bars = await asyncio.to_thread(_exchange_ref.get_candles, pair, granularity=granularity, limit=limit)
+        bars = await asyncio.to_thread(exchange.get_candles, pair, granularity=granularity, limit=limit)
         return JSONResponse(bars[-limit:])
     except Exception as e:
         return JSONResponse({"error": str(e)[:100]}, status_code=500)
@@ -503,11 +518,11 @@ async def api_pair_detail(request: Request, pair: str = "BTC/USD"):
 
     candles_1h: list = []
     try:
-        from main import _exchange_ref
-        if _exchange_ref:
+        exchange = _get_exchange_ref() if _get_exchange_ref else None
+        if exchange:
             import asyncio
             candles_1h = await asyncio.to_thread(
-                _exchange_ref.get_candles, pair, granularity="ONE_HOUR", limit=200
+                exchange.get_candles, pair, granularity="ONE_HOUR", limit=200
             )
     except Exception:
         pass

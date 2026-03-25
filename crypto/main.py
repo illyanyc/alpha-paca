@@ -1456,7 +1456,13 @@ async def run() -> None:
         f"Mode: LIVE"
     )
 
-    init_web(_state, _start_time, settings)
+    init_web(
+        _state, _start_time, settings,
+        run_rebalance=run_rebalance,
+        reload_coinbase_keys=reload_coinbase_keys,
+        update_trading_settings=update_trading_settings,
+        get_exchange=get_exchange,
+    )
 
     web_port = int(os.environ.get("PORT", "8080"))
     web_config = uvicorn.Config(
