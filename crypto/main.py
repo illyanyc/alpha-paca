@@ -319,10 +319,17 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
         return {
             "nav": prev.get("nav", 0),
             "cash": prev.get("cash", 0),
+            "buying_power": prev.get("buying_power", 0),
             "total_exposure_pct": prev.get("total_exposure_pct", 0),
             "unrealized_pnl": prev.get("unrealized_pnl", 0),
             "drawdown_pct": prev.get("drawdown_pct", 0),
             "positions_count": prev.get("positions_count", 0),
+            "realized_pnl_today": prev.get("realized_pnl_today", 0),
+            "total_realized_pnl": prev.get("total_realized_pnl", 0),
+            "total_trades": prev.get("total_trades", 0),
+            "total_win_rate": prev.get("total_win_rate", 0),
+            "daily_trades": prev.get("daily_trades", 0),
+            "daily_win_rate": prev.get("daily_win_rate", 0),
         }
 
     total_mv = sum(float(p.get("market_value_usd", 0)) for p in positions)

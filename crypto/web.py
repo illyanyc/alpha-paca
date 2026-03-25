@@ -78,18 +78,19 @@ def _snapshot() -> dict[str, Any]:
             "history": history[-60:],
         }
 
+    live_prices = s.get("prices", {})
     positions = []
     for p in s.get("positions", []):
         pair = p.get("pair", p.get("symbol", "?"))
         side = p.get("side", "long")
         qty = float(p.get("qty", 0))
         entry = float(p.get("avg_entry_price", 0))
-        current = float(p.get("current_price", 0))
-        pnl = float(p.get("unrealized_pnl", p.get("unrealized_pl", 0)))
-        pnl_pct = float(p.get("unrealized_pnl_pct", 0))
-        if pnl_pct == 0 and entry * qty > 0:
-            pnl_pct = (pnl / (entry * qty) * 100)
-        mv = float(p.get("market_value", qty * current))
+        current = float(live_prices.get(pair, {}).get("mid", 0) or p.get("current_price", 0))
+        if current <= 0:
+            current = float(p.get("current_price", 0))
+        pnl = (current - entry) * qty if entry > 0 and qty > 0 else 0
+        pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
+        mv = qty * current
         bot_id = p.get("bot_id", "swing")
         positions.append({
             "pair": pair, "side": side, "qty": qty, "entry": entry, "current": current,
@@ -127,6 +128,11 @@ def _snapshot() -> dict[str, Any]:
         })
 
     portfolio = s.get("portfolio", {})
+
+    live_unrealized = sum(p["pnl"] for p in positions)
+    pnl_summary = s.get("pnl_summary", {})
+    total_realized = pnl_summary.get("total_realized_pnl", portfolio.get("total_realized_pnl", 0))
+
     news = s.get("news_data", {})
     news_sentiment = news.get("overall_sentiment", "—") if isinstance(news, dict) else "—"
     news_score = news.get("overall_score", 0) if isinstance(news, dict) else 0
@@ -186,10 +192,10 @@ def _snapshot() -> dict[str, Any]:
             "cash": round(portfolio.get("cash", 0), 2),
             "buying_power": round(portfolio.get("buying_power", 0), 2),
             "exposure_pct": round(portfolio.get("total_exposure_pct", 0), 1),
-            "unrealized_pnl": round(portfolio.get("unrealized_pnl", 0), 2),
+            "unrealized_pnl": round(live_unrealized, 2),
             "drawdown_pct": round(portfolio.get("drawdown_pct", 0), 1),
             "daily_pnl": round(portfolio.get("realized_pnl_today", 0), 2),
-            "total_pnl": round(portfolio.get("total_realized_pnl", 0) + portfolio.get("unrealized_pnl", 0), 2),
+            "total_pnl": round(total_realized + live_unrealized, 2),
             "total_trades": portfolio.get("total_trades", 0),
             "total_win_rate": round(portfolio.get("total_win_rate", 0), 1),
             "daily_trades": portfolio.get("daily_trades", 0),
