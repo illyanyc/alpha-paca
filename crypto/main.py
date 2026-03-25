@@ -201,12 +201,14 @@ async def create_tables() -> None:
             "ALTER TABLE crypto_positions ADD COLUMN IF NOT EXISTS bot_id VARCHAR(10) NOT NULL DEFAULT 'swing'",
         ]:
             await conn.execute(sqlalchemy.text(stmt))
-        try:
-            await conn.execute(sqlalchemy.text(
-                "ALTER TABLE crypto_positions DROP CONSTRAINT IF EXISTS crypto_positions_pair_key"
-            ))
-        except Exception:
-            pass
+        for drop_stmt in [
+            "ALTER TABLE crypto_positions DROP CONSTRAINT IF EXISTS crypto_positions_pair_key",
+            "DROP INDEX IF EXISTS ix_crypto_positions_pair",
+        ]:
+            try:
+                await conn.execute(sqlalchemy.text(drop_stmt))
+            except Exception:
+                pass
 
 
 async def enrich_positions(exchange_positions: list[dict]) -> list[dict]:
@@ -326,6 +328,7 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
     total_mv = sum(float(p.get("market_value_usd", 0)) for p in positions)
     nav = float(acct.get("portfolio_value", 0)) or float(acct.get("equity", 0))
     cash = float(acct.get("cash", 0))
+    buying_power = float(acct.get("buying_power", cash))
     exposure = (total_mv / nav * 100) if nav > 0 else 0
     unrealized = sum(float(p.get("unrealized_pnl", 0)) for p in positions)
 
@@ -337,6 +340,7 @@ async def get_portfolio_state(exchange: CoinbaseCryptoService) -> dict:
     return {
         "nav": nav,
         "cash": cash,
+        "buying_power": buying_power,
         "total_exposure_pct": round(exposure, 1),
         "unrealized_pnl": unrealized,
         "drawdown_pct": drawdown_pct,
@@ -528,12 +532,16 @@ async def tick_momentum_trader(
                     continue
 
                 atr = _state.get("indicators_4h", {}).get(pair, {}).get("atr")
-                cash = portfolio.get("cash", 0)
-                nav = portfolio.get("nav", cash)
+                avail = portfolio.get("buying_power", portfolio.get("cash", 0))
+                nav = portfolio.get("nav", avail)
                 cap = settings.crypto.max_capital
                 tradeable = min(nav, cap) if cap > 0 else nav
 
                 if decision["action"] == "BUY":
+                    if avail < 10:
+                        momentum_bot.think(f"[momentum] {pair} SKIP: insufficient funds (${avail:,.2f} available)")
+                        continue
+
                     sized = compute_position_size(
                         pair=pair, bot_id="momentum",
                         account_nav=tradeable,
@@ -542,7 +550,10 @@ async def tick_momentum_trader(
                     )
                     if not sized:
                         continue
-                    notional = sized.notional_usd
+                    notional = min(sized.notional_usd, avail * 0.95)
+                    if notional < 10:
+                        momentum_bot.think(f"[momentum] {pair} SKIP: notional ${notional:,.2f} < $10 min")
+                        continue
 
                     exit_manager.register_position(
                         pair, "momentum", mid_price,
@@ -558,6 +569,8 @@ async def tick_momentum_trader(
                 )
 
                 if exec_result.get("status") == "filled":
+                    if decision["action"] == "BUY":
+                        avail -= notional
                     risk_guard.record_trade_time("momentum", pair)
                     pnl = exec_result.get("pnl")
                     if pnl is not None:
@@ -718,11 +731,15 @@ async def tick_swing_sniper(
                     continue
 
                 atr = _state.get("indicators_4h", {}).get(pair, {}).get("atr")
-                cash = portfolio.get("cash", 0)
+                avail = portfolio.get("buying_power", portfolio.get("cash", 0))
                 cap = settings.crypto.max_capital
-                tradeable = min(cash, cap) if cap > 0 else cash
+                tradeable = min(avail, cap) if cap > 0 else avail
 
                 if decision["action"] == "BUY":
+                    if avail < 10:
+                        swing_bot.think(f"[swing] {pair} SKIP: insufficient funds (${avail:,.2f} available)")
+                        continue
+
                     sized = compute_leverage_size(
                         pair=pair, conviction=decision["conviction"],
                         bot_id="swing", available_capital=tradeable,
@@ -730,7 +747,10 @@ async def tick_swing_sniper(
                     )
                     if not sized:
                         continue
-                    notional = sized.notional_usd
+                    notional = min(sized.notional_usd, avail * 0.95)
+                    if notional < 10:
+                        swing_bot.think(f"[swing] {pair} SKIP: notional ${notional:,.2f} < $10 min")
+                        continue
                 else:
                     notional = 0
 
@@ -739,6 +759,8 @@ async def tick_swing_sniper(
                 )
 
                 if exec_result.get("status") == "filled":
+                    if decision["action"] == "BUY":
+                        avail -= notional
                     risk_guard.record_trade_time("swing", pair)
                     pnl = exec_result.get("pnl")
                     if pnl is not None:
@@ -866,10 +888,13 @@ async def run_rebalance() -> dict[str, Any]:
     executor = _executor
     exit_mgr = _exit_manager
 
-    if not exchange or not exchange.is_authenticated:
-        return {"status": "error", "message": "Exchange not connected"}
+    if not exchange:
+        return {"status": "error", "message": "Exchange not initialized — service may still be starting"}
+    if not exchange.is_authenticated:
+        err = exchange.auth_error_message or "CDP PEM keys missing or invalid"
+        return {"status": "error", "message": f"Exchange not authenticated: {err}"}
     if not momentum_bot or not executor or not risk_guard:
-        return {"status": "error", "message": "Trading agents not initialized"}
+        return {"status": "error", "message": "Trading agents not initialized — service may still be starting"}
 
     settings = get_settings()
     pairs = settings.crypto.pair_list
@@ -995,13 +1020,16 @@ async def run_rebalance() -> dict[str, Any]:
             continue
 
         atr = _state.get("indicators_4h", {}).get(pair, {}).get("atr")
-        cash = portfolio.get("cash", 0)
-        nav = portfolio.get("nav", cash)
+        avail = portfolio.get("buying_power", portfolio.get("cash", 0))
+        nav = portfolio.get("nav", avail)
         cap = settings.crypto.max_capital
         tradeable = min(nav, cap) if cap > 0 else nav
 
         notional = 0.0
         if decision["action"] == "BUY":
+            if avail < 10:
+                continue
+
             sized = compute_position_size(
                 pair=pair, bot_id="momentum",
                 account_nav=tradeable,
@@ -1010,7 +1038,9 @@ async def run_rebalance() -> dict[str, Any]:
             )
             if not sized:
                 continue
-            notional = sized.notional_usd
+            notional = min(sized.notional_usd, avail * 0.95)
+            if notional < 10:
+                continue
 
             if exit_mgr:
                 exit_mgr.register_position(
@@ -1034,6 +1064,8 @@ async def run_rebalance() -> dict[str, Any]:
         }
 
         if exec_result.get("status") == "filled":
+            if decision["action"] == "BUY":
+                avail -= notional
             risk_guard.record_trade_time("momentum", pair)
             pnl = exec_result.get("pnl")
             trade_record["pnl"] = pnl
@@ -1393,13 +1425,15 @@ async def run() -> None:
 
     init_nav = float(acct.get("portfolio_value", acct.get("equity", 0))) if acct else 0
     init_cash = float(acct.get("cash", 0)) if acct else 0
+    init_buying_power = float(acct.get("buying_power", init_cash)) if acct else 0
     cap = settings.crypto.max_capital
     cap_label = f"${init_nav:,.2f} (whole account)" if cap <= 0 else f"${cap:,.0f}"
 
     _state["portfolio"] = {
-        "nav": init_nav, "cash": init_cash,
+        "nav": init_nav, "cash": init_cash, "buying_power": init_buying_power,
         "total_exposure_pct": 0, "unrealized_pnl": 0, "drawdown_pct": 0,
     }
+    logger.info("capital_snapshot", nav=init_nav, cash_total=init_cash, buying_power=init_buying_power)
 
     await telegram.send(
         "Alpha-Paca Crypto v3 Started (Adaptive Momentum + SwingSniper)\n"

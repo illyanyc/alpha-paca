@@ -336,6 +336,7 @@ class CoinbaseCryptoService:
         accounts = raw.get("accounts", [])
 
         cash = 0.0
+        available_cash = 0.0
         total_value = 0.0
 
         for acct in accounts:
@@ -346,6 +347,7 @@ class CoinbaseCryptoService:
 
             if currency in ("USD", "USDC", "USDT"):
                 cash += total
+                available_cash += available
                 total_value += total
             elif total > 0:
                 price = self.get_product_price(f"{currency}/USD")
@@ -355,7 +357,7 @@ class CoinbaseCryptoService:
         return {
             "equity": total_value,
             "cash": cash,
-            "buying_power": cash,
+            "buying_power": available_cash,
             "portfolio_value": total_value,
         }
 

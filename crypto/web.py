@@ -184,11 +184,12 @@ def _snapshot() -> dict[str, Any]:
         "portfolio": {
             "nav": round(portfolio.get("nav", 0), 2),
             "cash": round(portfolio.get("cash", 0), 2),
+            "buying_power": round(portfolio.get("buying_power", 0), 2),
             "exposure_pct": round(portfolio.get("total_exposure_pct", 0), 1),
             "unrealized_pnl": round(portfolio.get("unrealized_pnl", 0), 2),
             "drawdown_pct": round(portfolio.get("drawdown_pct", 0), 1),
             "daily_pnl": round(portfolio.get("realized_pnl_today", 0), 2),
-            "total_pnl": round(portfolio.get("total_realized_pnl", 0), 2),
+            "total_pnl": round(portfolio.get("total_realized_pnl", 0) + portfolio.get("unrealized_pnl", 0), 2),
             "total_trades": portfolio.get("total_trades", 0),
             "total_win_rate": round(portfolio.get("total_win_rate", 0), 1),
             "daily_trades": portfolio.get("daily_trades", 0),
