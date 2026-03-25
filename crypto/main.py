@@ -515,6 +515,11 @@ async def tick_momentum_trader(
                 )
 
             decisions = result.get("decisions", [])
+            avail = portfolio.get("buying_power", portfolio.get("cash", 0))
+            nav = portfolio.get("nav", avail)
+            cap = settings.crypto.max_capital
+            tradeable = min(nav, cap) if cap > 0 else nav
+
             for decision in decisions:
                 pair = decision["pair"]
                 decision["bot_id"] = "momentum"
@@ -532,10 +537,6 @@ async def tick_momentum_trader(
                     continue
 
                 atr = _state.get("indicators_4h", {}).get(pair, {}).get("atr")
-                avail = portfolio.get("buying_power", portfolio.get("cash", 0))
-                nav = portfolio.get("nav", avail)
-                cap = settings.crypto.max_capital
-                tradeable = min(nav, cap) if cap > 0 else nav
 
                 if decision["action"] == "BUY":
                     if avail < 10:
@@ -714,6 +715,10 @@ async def tick_swing_sniper(
                 )
 
             decisions = result.get("decisions", [])
+            avail = portfolio.get("buying_power", portfolio.get("cash", 0))
+            cap = settings.crypto.max_capital
+            tradeable = min(avail, cap) if cap > 0 else avail
+
             for decision in decisions:
                 pair = decision["pair"]
                 decision["bot_id"] = "swing"
@@ -731,9 +736,6 @@ async def tick_swing_sniper(
                     continue
 
                 atr = _state.get("indicators_4h", {}).get(pair, {}).get("atr")
-                avail = portfolio.get("buying_power", portfolio.get("cash", 0))
-                cap = settings.crypto.max_capital
-                tradeable = min(avail, cap) if cap > 0 else avail
 
                 if decision["action"] == "BUY":
                     if avail < 10:
@@ -1001,6 +1003,11 @@ async def run_rebalance() -> dict[str, Any]:
     # 6) Execute qualifying trades
     trades_executed: list[dict[str, Any]] = []
     decisions = result.get("decisions", [])
+    avail = portfolio.get("buying_power", portfolio.get("cash", 0))
+    nav = portfolio.get("nav", avail)
+    cap = settings.crypto.max_capital
+    tradeable = min(nav, cap) if cap > 0 else nav
+
     for decision in decisions:
         pair = decision["pair"]
         decision["bot_id"] = "momentum"
@@ -1020,10 +1027,6 @@ async def run_rebalance() -> dict[str, Any]:
             continue
 
         atr = _state.get("indicators_4h", {}).get(pair, {}).get("atr")
-        avail = portfolio.get("buying_power", portfolio.get("cash", 0))
-        nav = portfolio.get("nav", avail)
-        cap = settings.crypto.max_capital
-        tradeable = min(nav, cap) if cap > 0 else nav
 
         notional = 0.0
         if decision["action"] == "BUY":
