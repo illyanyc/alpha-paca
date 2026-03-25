@@ -337,6 +337,8 @@ class CoinbaseCryptoService:
 
         cash = 0.0
         available_cash = 0.0
+        usd_available = 0.0
+        usd_hold = 0.0
         total_value = 0.0
 
         for acct in accounts:
@@ -349,15 +351,26 @@ class CoinbaseCryptoService:
                 cash += total
                 available_cash += available
                 total_value += total
+                if currency == "USD":
+                    usd_available = available
+                    usd_hold = hold
             elif total > 0:
                 price = self.get_product_price(f"{currency}/USD")
                 if price > 0:
                     total_value += total * price
 
+        logger.info(
+            "account_balances",
+            usd_available=round(usd_available, 2),
+            usd_hold=round(usd_hold, 2),
+            stablecoin_total=round(cash, 2),
+            stablecoin_available=round(available_cash, 2),
+        )
+
         return {
             "equity": total_value,
             "cash": cash,
-            "buying_power": available_cash,
+            "buying_power": usd_available,
             "portfolio_value": total_value,
         }
 
